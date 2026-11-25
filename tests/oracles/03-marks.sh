@@ -22,13 +22,13 @@ for lang in c rs go py; do
     case $lang in py) cmd="/usr/bin/python3 /guest/sdk-py.py" ;; *) cmd=/guest/sdk-$lang ;; esac
     # shellcheck disable=SC2086
     "$PATINA" run --out "lang-$lang" --mount "$PATINA_GUESTS:/guest" -- $cmd marks >"lang-$lang.txt" 2>&1 || die "$lang: $(tail -2 "lang-$lang.txt")"
-    got=$("$PATINA" log events "lang-$lang" --types mark,op | jq -r 'select(.type == "mark" or (.type == "op" and .op == "write" and .path == "/work/marked")) | .label // .op' | paste -sd,)
+    got=$("$PATINA" inspect events "lang-$lang" --types mark,op | jq -r 'select(.type == "mark" or (.type == "op" and .op == "write" and .path == "/work/marked")) | .label // .op' | paste -sd,)
     [ "$got" = "ack 1,write,ack 2" ] || die "$lang: marks and the write: $got"
 done
 
 # The edges of a label, from one C guest.
 "$PATINA" run --out edge -- "$marks" edge >edge.txt 2>&1 || die "edge: $(tail -2 edge.txt)"
-"$PATINA" log events edge --types mark >edge.jsonl
+"$PATINA" inspect events edge --types mark >edge.jsonl
 want=$(awk 'BEGIN { for (i = 0; i < 255; i++) printf "%d", i % 10 }')
 [ "$(jq -r 'select(.len == 255) | .label' edge.jsonl)" = "$want" ] || die "the 255-byte label: $(jq -c 'select(.len == 255)' edge.jsonl)"
 [ "$(jq -r 'select(.len == 10) | .label_hex' edge.jsonl)" = 610a6222635c64ff0065 ] || die "odd bytes: $(jq -c 'select(.len == 10)' edge.jsonl)"
@@ -41,13 +41,13 @@ grep -qx 'across -14' edge/boot-1/stdout && grep -qx 'end 0' edge/boot-1/stdout 
 rc=0
 "$PATINA" verify --seed 1 --runs 3 --vary cpu,aslr,load --out thr -- "$marks" threads >thr.txt 2>&1 || rc=$? # lint-allow: seed — verify repeats one seed; any seed shows it
 [ "$rc" = 0 ] && grep -q '^identical: 3 runs' thr.txt || die "marks from threads: exit $rc: $(tail -3 thr.txt)"
-pids=$("$PATINA" log events thr/run-0 --types mark | jq -r 'select(.type == "mark") | "\(.label | split(" ")[0])=\(.pid)"' | sort -u | paste -sd,)
+pids=$("$PATINA" inspect events thr/run-0 --types mark | jq -r 'select(.type == "mark") | "\(.label | split(" ")[0])=\(.pid)"' | sort -u | paste -sd,)
 case $pids in child=*,t1=*,t2=*) ;; *) die "marks and their processes: $pids" ;; esac
 [ "$(echo "$pids" | tr ',' '\n' | cut -d= -f2 | sort -u | wc -l)" = 2 ] || die "two processes: $pids"
 
 # No SDK call, no label or text record (its paths are logged as string records too).
 "$PATINA" run --out nosdk -- "$PATINA_GUESTS/hello-static" >nosdk.txt 2>&1 || die "hello: $(tail -2 nosdk.txt)"
-"$PATINA" log dump nosdk/boot-1/boundary.log >nosdk.dump || die "log dump of nosdk"
+"$PATINA" inspect dump nosdk/boot-1/boundary.log >nosdk.dump || die "log dump of nosdk"
 awk '$2 == "str" && $5 == "path" {p++} END {exit !p}' nosdk.dump || die "no path record in nosdk: the dump's form changed"
 n=$(awk '$2 == "str" && ($5 == "label" || $5 == "text") {n++} END {print n + 0}' nosdk.dump)
 [ "$n" = 0 ] || die "label or text records in a run without SDK calls"

@@ -1,4 +1,4 @@
-# 14. `patina explain` on four kinds of failure, each the first failing seed of 1-64: a race
+# 14. `patina inspect story` on four kinds of failure, each the first failing seed of 1-64: a race
 #    between threads (the jobs example), crash consistency (acklog under `--faults crash`), a
 #    two-machine bug (tests/guests/machines/kv.py, the backup acknowledging before it applies) and a
 #    three-machine split brain (tests/guests/machines/q3.py nofence under partitions). Which seed fails
@@ -25,9 +25,9 @@ first() {
 }
 # story RUNDIR: the JSON story in RUNDIR.story and the event log in RUNDIR.events.
 story() {
-    st=0; timeout 120 "$PATINA" explain "$1" --format json >"$1.story" 2>"$1.err" || st=$?
+    st=0; timeout 120 "$PATINA" inspect story "$1" --format json >"$1.story" 2>"$1.err" || st=$?
     [ "$st" = 0 ] || die "explain $1: exit $st ($(cat "$1.err"))"
-    "$PATINA" log events "$1" >"$1.events"
+    "$PATINA" inspect events "$1" >"$1.events"
 }
 # check RUNDIR CASE: the case's facts, from the run (tests/cli/explain-facts.py).
 check() { python3 -I "$(dirname "$0")/explain-facts.py" "$1" "$2" "$PATINA" || die "$2: the story"; }
@@ -60,7 +60,7 @@ sweep "$RUNS/sw-kv" --seeds 1..3 --config "$RUNS/kv-ok.toml" --mount "$G":/guest
 sweep "$RUNS/sw-points" --seeds 1..6 -- "$G/rw-races" lms
 n=0
 for r in "$RUNS"/sw-*/seed-*; do
-    st=0; timeout 120 "$PATINA" explain "$r" >"$r.txt" 2>&1 || st=$?
+    st=0; timeout 120 "$PATINA" inspect story "$r" >"$r.txt" 2>&1 || st=$?
     [ "$st" = 0 ] || die "explain $r: exit $st ($(tail -2 "$r.txt"))"
     n=$((n + 1))
 done

@@ -16,9 +16,9 @@
 o=$RUNS/13-points; mkdir -p "$o"
 for v in ok early; do
     rm -f "$o/$v.toml"
-    conf "$o/$v.toml" a python3 /guest/ack2.py a; printf 'ready = "patina wait :7000"\n' >> "$o/$v.toml"
+    conf "$o/$v.toml" a python3 /guest/ack2.py a; printf 'ready = "patina ctl wait :7000"\n' >> "$o/$v.toml"
     if [ $v = ok ]; then conf "$o/$v.toml" b python3 /guest/ack2.py b; else conf "$o/$v.toml" b python3 /guest/ack2.py b early; fi
-    printf 'ready = "patina wait :7000"\n' >> "$o/$v.toml"
+    printf 'ready = "patina ctl wait :7000"\n' >> "$o/$v.toml"
     main_unfaulted "$o/$v.toml"
 done
 D="python3 /guest/ack2.py main 3"
@@ -29,7 +29,7 @@ n=$(field "$o/base/result.json" machines.list.1.crash_points.0)
 [ "$n" -ge 2 ] || die "a counted $n crash points"
 p=$((n / 2))
 run_ok "$o/at" $s --config "$o/ok.toml" --fault crash-at=$p@a -- $D
-"$PATINA" log events "$o/at" --types crash | grep '"type":"crash"' >"$o/at.crash" || die "no crash event"
+"$PATINA" inspect events "$o/at" --types crash | grep '"type":"crash"' >"$o/at.crash" || die "no crash event"
 [ "$(wc -l <"$o/at.crash")" = 1 ] || die "crash events: $(cat "$o/at.crash")"
 python3 -I - "$o/at" "$p" <<'PY' || die "crash at point $p of a"
 import json, os, sys

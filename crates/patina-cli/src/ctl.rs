@@ -17,6 +17,9 @@ fn call(op: u64, words: &[u8]) -> i64 {
 }
 
 pub fn main(words: &[String]) -> ExitCode {
+    if words.first().map(|s| s.as_str()) == Some("wait") {
+        return crate::ready::wait(&words[1..]);
+    }
     let text = words.join(" ");
     if call(OP_HELLO, &[]) < 0 {
         eprintln!("patina ctl: not inside a Patina run");

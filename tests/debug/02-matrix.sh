@@ -15,7 +15,7 @@
 E=$PATINA_GUESTS/examples
 # seq_of RUNDIR PYTHON-EXPR: the sequence number of the first event (dict e) the expression holds for
 seq_of() {
-    "$PATINA" log events "$1" | python3 -I -c 'import json,sys
+    "$PATINA" inspect events "$1" | python3 -I -c 'import json,sys
 ev = [json.loads(l) for l in sys.stdin]
 print(next(e["seq"] for e in ev if "seq" in e and eval(sys.argv[1])))' "$2"
 }
@@ -57,7 +57,7 @@ delete
 continue
 EOF
 # The program's first call, named the way --at names it.
-name=$("$PATINA" log events "$r" | python3 -I -c 'import json,sys
+name=$("$PATINA" inspect events "$r" | python3 -I -c 'import json,sys
 print(next(e["name"] for e in map(json.loads, sys.stdin) if e["type"] == "call"))')
 session "$r" "$RUNS/rs.gdb" --at "call:$name:1"
 [ "$(fact "$r" line)" = 28 ] || die "Rust: the breakpoint stopped at line $(fact "$r" line)"
@@ -77,8 +77,8 @@ delete
 continue
 EOF
 session "$r" "$RUNS/write.gdb" --at "call:$name:1"
-"$PATINA" log events "$r" >"$r.events"
-"$PATINA" log events "$r/debug" >"$r.session-events"
+"$PATINA" inspect events "$r" >"$r.events"
+"$PATINA" inspect events "$r/debug" >"$r.session-events"
 m=$(python3 -I - "$r.events" "$r.session-events" <<'EOF'
 import json, sys
 a, b = ([json.loads(l) for l in open(p)] for p in sys.argv[1:])
@@ -138,7 +138,7 @@ r=$RUNS/kv
 printf '[machine.primary]\nrun = ["python3", "/guest/kv.py", "primary"]\n[machine.backup]\nrun = ["python3", "/guest/kv.py", "backup"]\n' >"$RUNS/kv.toml"
 [ -z "$TRAPS" ] || cat "$TRAPS" >>"$RUNS/kv.toml"
 prun "$r" --seed 1 --config "$RUNS/kv.toml" --mount "$PATINA_GUESTS":/guest:copy -- python3 /guest/kv.py main
-at=$("$PATINA" log events "$r" | python3 -I -c 'import json,sys
+at=$("$PATINA" inspect events "$r" | python3 -I -c 'import json,sys
 print([e for e in map(json.loads, sys.stdin) if e["type"] == "call" and e.get("machine") == "backup"][-1]["seq"])')
 cat >"$RUNS/machines.gdb" <<'EOF'
 python

@@ -221,7 +221,7 @@ or root can).
 
 Where AppArmor restricts unprivileged user namespaces (Ubuntu 24.04 and later), the kernel
 admits the keeper's and PID 1's namespaces only for an executable with a profile that allows
-`userns` (`patina doctor --print-apparmor-profile`); root, and an unrestricted host, need none.
+`userns` (`patina doctor apparmor`); root, and an unrestricted host, need none.
 The profile admits whatever file is at its path, so it belongs on a path only root can write
 (`install.sh` says so when the path or a directory above it is the user's). Every process of
 the sandbox runs under it, guests too: a guest's `unshare` is refused by the runtime, and a
@@ -474,7 +474,7 @@ patina: error: --faults crash: acts on main too, and main is not crashed or kill
   machine by its device, and a `sync` flushes the caller's machine's mappings only. At the end of the
   run every machine's live tree is a record of the log (`KIND_LIVE_TREE`), and the launcher splits
   the log into one plain log per disk (`durability::log::split_machines`: `machine/NAME/boot-K/`, K
-  the boot the disk began with), which `patina log ops`, the self-check (`check::disks`, run
+  the boot the disk began with), which `patina inspect ops`, the self-check (`check::disks`, run
   for every run with machines) and `materialise` read as a single machine's.
 - **Machine crash.** `crash NAME` (`MACHINE_CRASH`) or the seed under `--faults crash`
   (`MachineConf::crash` `SEED_CRASH`, drawn as the process kills are) runs
@@ -631,11 +631,11 @@ until the record is written; `execve`'s arguments are read from the program's ar
 program's view of the file system, so no host path enters.
 
 Replay runs the program again and compares record by record
-(`replay.rs`); `patina log diff` names the first difference; `patina verify` repeats a seed
+(`replay.rs`); `patina inspect diff` names the first difference; `patina verify` repeats a seed
 while changing the host and compares (`verify.rs`). A run a sweep pruned kept no logs: its
 replay is compared by digest and outcome alone.
 
-Observation (`Config::observe`, set only by `patina explain` on its replay, never in
+Observation (`Config::observe`, set only by `patina inspect story` on its replay, never in
 `run.json`) keeps the first `proto::rec::OBS_BYTES` (128) bytes of each data call that moved
 any (read, write, their `p` and `v` forms, send, receive) for the story `explain.rs` tells.
 After the call's record is written and chained, `log::observe` appends `Observe` records
@@ -685,7 +685,7 @@ Judging again (`recheck.rs`) is the one exception: `recheck::rejudge` runs the c
 kept run directory (`check::run_on`, with a worker's server or none) and rewrites only what
 follows from the verdict (`result::with_check` over the run's own end, `outcome::ok_end`),
 writing `pending` first so an interrupted recheck never leaves the old verdict under the new
-checker. `patina report --recheck` and a resumed sweep share it: the checker is not part of a sweep's
+checker. `patina recheck` and a resumed sweep share it: the checker is not part of a sweep's
 identity (`sweep::identity`); a run whose recorded checker differs (`recheck::same_checker`) or
 whose verdict is `pending` is judged again from its logs, or run again when they were pruned
 (`sweep::have`). The case (`Config::case`: id and line) is in `run.json`, so a replay and
@@ -699,7 +699,7 @@ written for a case still matches once its line gains settings.
 `--ok-exit` (`Config::ok_exit`, in `run.json`) is an input of `outcome::classify`: a guest
 that exited with a listed status, not on a signal, ends `ok`, stop `ok-exit`, and the checker
 judges it; the logs and digest are those of the run without the flag. Each boot's
-final disk is `boot-K/live.tree` (`durability::tree`); `patina log tree` writes it out.
+final disk is `boot-K/live.tree` (`durability::tree`); `patina inspect tree` writes it out.
 A sweep keeps a run's trees compressed (`durability::kept`, from `sweep::cut`, after the run
 and its checker are done with them): `live.tree.zst`, and `post-crash.tree.zst` in a run no
 checker reads (`recheck::checkable`: a checker's input stays as the checker saw it, for
@@ -708,7 +708,7 @@ the static release binary needs), checked to read back before the original goes.
 reader takes either form (`kept::live`, `kept::post_crash`). `patina run` and `--keep all`
 keep the trees whole.
 
-`patina log events RUNDIR` (`events.rs`) is the stable export of a run directory for checkers:
+`patina inspect events RUNDIR` (`events.rs`) is the stable export of a run directory for checkers:
 one JSON line per boundary record, with each operation-log record after its call (same
 `seq`; an operation whose call has no record, as when a crash point fired between the two,
 goes before the first record later in virtual time) and named by replaying the namespace
@@ -717,7 +717,7 @@ that moment. An `Injected` record and its `Name` records become one `fault` even
 fields `faults.recent` shows (`launcher::attribution::injected`, shared); a call's `Str`
 records become fields of its event. It streams both
 logs and keeps only the live names. Its fields are versioned (`v` in the header) and only
-added to; `log dump` and `log ops` stay the text forms.
+added to; `inspect dump` and `inspect ops` stay the text forms.
 
 The logs of a run (this one and the operation log) are limited (`Config::log_limit`,
 `[run] log-limit`): the append that would pass the limit ends the run instead, so the cut depends
@@ -1271,7 +1271,7 @@ not answer (a cut either way or a machine down when a cut begins or the timer is
 blackout window ahead). Answered probes are not modelled one by one: they change only when
 the first unanswered one comes ("Limits"). So an idle connection with a reachable peer costs
 no event and no record for any length of time (an idle hour at `TCP_KEEPIDLE` 1 s: none).
-Each unanswered probe is a `DEC_WIRE_PROBE` record [conn, side, count] (`patina log events`:
+Each unanswered probe is a `DEC_WIRE_PROBE` record [conn, side, count] (`patina inspect events`:
 `"event":"probe"`), one per `TCP_KEEPINTVL` while an outage lasts, until the side gives up. A
 `setsockopt` of one of the options on a connected socket marks it, as a send does, and the
 supervisor sets the timer at its next step; nothing is recorded for it, so a run whose probes
@@ -1398,7 +1398,7 @@ boot's first guest the supervisor puts them back into the table by path (`seed_t
 dropping the machine's entries of its earlier disk (the new disk's inode numbers can repeat them).
 The digest and the self-check leave times out. The run keeps its own
 outcome and reports the failed self-check beside it (`result.json`'s `self_check`, exit
-status 2; a sweep counts such runs apart and keeps their logs). `patina log ops` prints the
+status 2; a sweep counts such runs apart and keeps their logs). `patina inspect ops` prints the
 log.
 
 ## The fsync-error model

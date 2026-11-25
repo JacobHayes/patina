@@ -23,7 +23,7 @@ done
 # shows in the boundary log (its stdout reaches the run directory only at the end). Only the
 # first records are read.
 for i in $(seq 300); do
-    "$PATINA" log dump --from 1 --to 200 "$o/boot-1/boundary.log" >"$o.dump" 2>/dev/null || true
+    "$PATINA" inspect dump --from 1 --to 200 "$o/boot-1/boundary.log" >"$o.dump" 2>/dev/null || true
     grep -q ' getppid ' "$o.dump" && break
     sleep 0.05
 done

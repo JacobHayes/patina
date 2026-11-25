@@ -11,7 +11,7 @@ RUNS/hang.txt (RUNS is the script's run directory, kept and uploaded with a fail
     hang.py logs RUNS           after the kill: for each run under RUNS that has no result.json
                                 (it was still going), its boundary log cut to the records written
                                 (the launcher sizes the file ahead and cuts it only at the end),
-                                its last records (`patina log dump`) and its keeper's log tail;
+                                its last records (`patina inspect dump`) and its keeper's log tail;
                                 then RUNS is bounded to LIMIT bytes by deleting its largest files
 
 Both append to RUNS/hang.txt and never fail the caller: what cannot be read is said there.
@@ -136,7 +136,7 @@ def logs(runs, out):
         out.write(f"   {n} records (the file is cut to them); the last: seq {seq}, virtual time {vclock} ns; "
                   f"its last {TAIL}:\n")
         if patina:
-            r = subprocess.run([patina, "log", "dump", log, "--from", str(max(0, seq - TAIL))],
+            r = subprocess.run([patina, "inspect", "dump", log, "--from", str(max(0, seq - TAIL))],
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
             for line in r.stdout.splitlines()[-TAIL:]:
                 out.write(f"   {line}\n")

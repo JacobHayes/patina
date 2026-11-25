@@ -21,7 +21,7 @@ rebuild and run the same command. Use one `--out` per experiment. A changed chec
 rerun anything: the runs are judged again from their logs.
 
 The summary prints the first three groups in full and the others one line each, numbered;
-`patina report --group N DIR` prints one in full, `patina report DIR` the whole summary again,
+`patina inspect summary --group N DIR` prints one in full, `patina inspect summary DIR` the whole summary again,
 and `report.json` in the sweep directory has every group with its runs. `--keep fail` (the
 default) keeps the logs of each group's first three runs, and with a checker every run the
 checker read; any other run keeps `run.json` and `result.json`, and its seed reproduces it.
@@ -51,7 +51,7 @@ outcomes: failure 10, ok 10
   example: AssertionError: 3 != 2
   rerun:  patina run --seed 1 --config /tmp/casedemo/patina-out/sweep/seed-1/2-test_store.Store.test_counter/run.json -- python3 -m unittest test_store.Store.test_counter
   replay: patina replay /tmp/casedemo/patina-out/sweep/seed-1/2-test_store.Store.test_counter
-  explain: patina explain /tmp/casedemo/patina-out/sweep/seed-1/2-test_store.Store.test_counter
+  explain: patina inspect story /tmp/casedemo/patina-out/sweep/seed-1/2-test_store.Store.test_counter
 ```
 
 A line may start with its own settings, up to a word `--`: `--disk DIR[:GUEST]`, `--mount`,
@@ -109,11 +109,11 @@ known: mul-zero matched no run; with its numbers written as the signature writes
 A pattern matches the signature as the report prints it, with numbers as `N`: an entry that
 would match written that way says so, as `mul-zero` does. A pattern ending ` {faults: *fs-short*}`
 also matches the faults that fired in the run. `[sweep] known = "FILE"` makes a file the
-default. `patina report --known FILE DIR` applies a file to runs already made.
+default. `patina inspect summary --known FILE DIR` applies a file to runs already made.
 
-## Judging again: `patina report --recheck`
+## Judging again: `patina recheck`
 
-After changing only the checker, or a table it reads, `patina report --recheck DIR` judges the
+After changing only the checker, or a table it reads, `patina recheck DIR` judges the
 kept runs again without running them, then prints the report. Here case 4 differs from the
 reference by design, and the checker skips the cases `chk/expected.txt` names:
 
@@ -126,12 +126,12 @@ exit: 0 1 0 0
 patina sweep --seeds 1 --keep all --cases corpus.txt --out patina-out/ref -- sh -c {}
 patina sweep --seeds 1..2 --cases corpus.txt --check 'chk/diff patina-out/ref' -- bash -c {}
 echo 4 >> chk/expected.txt
-patina report --recheck patina-out/sweep
+patina recheck patina-out/sweep
 ```
 
 ```text
 recheck: judged 8 runs again in 0.0s
-patina report: 8 runs, 0 findings in 0 groups, 8 ok
+patina inspect summary: 8 runs, 0 findings in 0 groups, 8 ok
 outcomes: ok 8
 check: judged 6 of 8 runs: 6 passed, 0 failed; 2 not judged (expected 2)
 check: every judged run passed and no --known !ID entry shows that this check can fail

@@ -18,7 +18,7 @@ assert d["ok"] and checks and not bad, bad
 print("doctor:", ", ".join(f"{c['name']} {'ok' if c['ok'] else 'missing'}" for c in checks))
 PY
 exe=$(realpath "$PATINA")
-timeout 60 "$PATINA" doctor --print-apparmor-profile >"$RUNS/profile" || die "profile: exit $?"
+timeout 60 "$PATINA" doctor apparmor >"$RUNS/profile" || die "profile: exit $?"
 grep -qF "profile patina \"$exe\" flags=(unconfined)" "$RUNS/profile" || die "profile: not for $exe: $(cat "$RUNS/profile")"
 grep -qx '  userns,' "$RUNS/profile" || die "profile: no userns rule"
 for parser in /usr/sbin/apparmor_parser /sbin/apparmor_parser; do

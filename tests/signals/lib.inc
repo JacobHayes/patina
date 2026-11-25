@@ -36,4 +36,4 @@ verify() {
 }
 
 # deliveries RUN: "count signal" lines of the guest signal deliveries in a boundary log.
-deliveries() { "$PATINA" log dump "$1/boot-1/boundary.log" | awk '$2 == "signal" {print $5}' | sort | uniq -c; }
+deliveries() { "$PATINA" inspect dump "$1/boot-1/boundary.log" | awk '$2 == "signal" {print $5}' | sort | uniq -c; }

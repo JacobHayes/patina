@@ -20,7 +20,7 @@ for k in opts alive closed; do
 done
 run_ok "$o/cut" 1 --fault net-blackout=1000+10000 -- /guest/sockets keepalive cut
 sed 's/^/    /' "$o/cut/boot-1/stdout"
-n=$("$PATINA" log events "$o/cut" | grep -c '"event":"probe"')
+n=$("$PATINA" inspect events "$o/cut" | grep -c '"event":"probe"')
 [ "$n" = 6 ] || die "unanswered probes in the window: $n, two sides of 3 each"
 c=$(run "$o/cut-off" 1 -- /guest/sockets keepalive cut)
 [ "$c" = liveness ] || die "without the blackout: class $c"

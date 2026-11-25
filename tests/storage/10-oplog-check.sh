@@ -1,4 +1,4 @@
-# 10. The tracker self-check (patina log ops --check: replay of the whole log = the exported live
+# 10. The tracker self-check (patina inspect check-ops: replay of the whole log = the exported live
 # tree) passes on every boot of a sample of each storage reproductions workload, crashes included
 # (reduced: 4 seeds each).
 #@ tier=area budget=60 slots=4
@@ -9,7 +9,7 @@ chk() {
     SWEEP_OUT=$RUNS/$name SWEEP_KEEP=all "$HERE/lib/sweep.sh" "$@" >/dev/null
     k=0
     for s in $(seq 1 "$N"); do
-        "$PATINA" log ops --check "$RUNS/$name/run-$s" >"$RUNS/$name/check-$s.txt" 2>&1 || die "$name seed $s: $(tail -2 "$RUNS/$name/check-$s.txt")"
+        "$PATINA" inspect check-ops "$RUNS/$name/run-$s" >"$RUNS/$name/check-$s.txt" 2>&1 || die "$name seed $s: $(tail -2 "$RUNS/$name/check-$s.txt")"
         k=$((k + $(grep -c ': ok (' "$RUNS/$name/check-$s.txt")))
         rm -rf "${RUNS:?}/$name/run-$s"
     done

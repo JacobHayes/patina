@@ -1,4 +1,4 @@
-# `patina log events` on the run directories a user has: every injected fault of a run once,
+# `patina inspect events` on the run directories a user has: every injected fault of a run once,
 # the last ones as result.json's faults.recent names them; crashes and the boots after
 # them, with each boot's operations named on its own tree; a sweep's cut log (head, a
 # `cut` line, tail) and a pruned run (an error, no stream); an operation after its call; the
@@ -11,7 +11,7 @@ cd "$RUNS"
 
 # Faults: more than result.json keeps (its last 20), each once.
 "$PATINA" run --out faults --fault fs-delay-permille=700 -- "$kv" fixed >faults.txt 2>&1 || die "faults run: $(tail -2 faults.txt)"
-"$PATINA" log events faults >faults.jsonl
+"$PATINA" inspect events faults >faults.jsonl
 injected=$(jq .faults.injected faults/result.json)
 [ "$injected" -gt 20 ] || die "faults run: only $injected faults injected"
 [ "$(jq -s 'map(select(.type == "fault" and .class != "fsync-report" and .class != "other")) | length' faults.jsonl)" = "$injected" ] ||
@@ -27,7 +27,7 @@ for d in crashes/seed-*; do
     k=$(jq .boots "$d/result.json")
     [ "$k" -gt 1 ] || continue
     n=$((n + 1))
-    "$PATINA" log events "$d" >"$d/events.jsonl"
+    "$PATINA" inspect events "$d" >"$d/events.jsonl"
     cp "$d/events.jsonl" c.jsonl
     # A boot after a crash, and the crash before it; the operations of every
     # boot name data.log by its path on that boot's tree.
@@ -51,25 +51,25 @@ for f in faults.jsonl crashes/seed-*/events.jsonl; do
 done
 
 # Filters.
-"$PATINA" log events faults --types op >f1
+"$PATINA" inspect events faults --types op >f1
 jq -e -s 'map(.type) - ["header", "boot", "op"] | length == 0' f1 >/dev/null || die "--types op"
 s=$(jq -s 'map(select(.type == "op"))[3].seq' faults.jsonl)
-"$PATINA" log events faults --from "$s" --to "$s" >f2
+"$PATINA" inspect events faults --from "$s" --to "$s" >f2
 jq -e -s --argjson s "$s" 'map(select(.seq != null)) | length > 0 and all(.seq == $s)' f2 >/dev/null || die "--from/--to"
 rc=0
-"$PATINA" log events faults --types nosuch >/dev/null 2>&1 || rc=$?
+"$PATINA" inspect events faults --types nosuch >/dev/null 2>&1 || rc=$?
 [ "$rc" = 2 ] || die "--types nosuch: exit $rc"
 
 # A sweep's cut log: its first and last records, a `cut` line between; a pruned run: no stream.
 "$PATINA" sweep --seeds 1..2 --config "$("$PATINA_CFG" log-limit=12)" --out cut -- "$churn" 100000000 >cut.txt 2>&1 || true
 d=$(ls -d cut/seed-* | sed -n 1p)
 [ -f "$d/boot-1/boundary.cut" ] || die "the cut sweep kept no cut log: $(tail -2 cut.txt)"
-"$PATINA" log events "$d" >cut.jsonl
+"$PATINA" inspect events "$d" >cut.jsonl
 # Its events are the whole log's first and last, as the replay (which writes the whole log)
 # gives them: the last head event may have lost the strings that follow its record.
 "$PATINA" replay "$d" --out cut-replay >cut-replay.txt 2>&1 || true
 grep -q '^identical' cut-replay.txt || die "replay of the cut run: $(head -2 cut-replay.txt)"
-"$PATINA" log events cut-replay >whole.jsonl
+"$PATINA" inspect events cut-replay >whole.jsonl
 python3 -I - cut.jsonl whole.jsonl <<'PY' || die "cut log: its events are not the whole log's head and tail"
 import json, sys
 cut, whole = ([json.loads(l) for l in open(f)] for f in sys.argv[1:])
@@ -83,6 +83,6 @@ assert tail == all_[len(all_) - len(tail):], "tail"
 PY
 "$PATINA" sweep --seeds 1..2 --out pruned -- "$kv" fixed >pruned.txt 2>&1 || die "pruned sweep: $(tail -2 pruned.txt)"
 rc=0
-"$PATINA" log events pruned/seed-1 >pruned.jsonl 2>pruned.err || rc=$?
+"$PATINA" inspect events pruned/seed-1 >pruned.jsonl 2>pruned.err || rc=$?
 [ "$rc" = 2 ] && [ ! -s pruned.jsonl ] && [ -s pruned.err ] || die "a pruned run: exit $rc, $(wc -l <pruned.jsonl) lines"
 echo "ok: $injected faults, $n crashed runs, a cut log of $(jq .records "$d/boot-1/boundary.cut") records"

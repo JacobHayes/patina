@@ -44,7 +44,7 @@ def sweep(name, *args):
 
 
 def report(*args):
-    st, so, se = patina("report", "--format", "json", *args)
+    st, so, se = patina("inspect", "summary", "--format", "json", *args)
     if not so:
         die(f"report {args}: {se}")
     return st, json.loads(so)

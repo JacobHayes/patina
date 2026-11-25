@@ -86,6 +86,6 @@ for j in 1111111111111111 2222222222222222; do
 done
 lhs=$(digest "$out/dead-1111111111111111"); rhs=$(digest "$out/dead-2222222222222222")
 [ "$lhs" = "$rhs" ] ||
-    die "deadargs: unread argument registers reach the log: $("$PATINA" log diff "$out/dead-1111111111111111/boot-1/boundary.log" "$out/dead-2222222222222222/boot-1/boundary.log" | sed -n 2,3p)"
+    die "deadargs: unread argument registers reach the log: $("$PATINA" inspect diff "$out/dead-1111111111111111/boot-1/boundary.log" "$out/dead-2222222222222222/boot-1/boundary.log" | sed -n 2,3p)"
 echo "deadargs: junk in the argument registers calls do not read leaves the digest unchanged"
 rm -rf "${out:?}"/dead-*

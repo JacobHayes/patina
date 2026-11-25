@@ -6,7 +6,7 @@
 #  b. a stock parent (/bin/sh) running `mixed leaf` twice: one image, 2 starts;
 #  c. more distinct instrumented paths than the table holds: ok, and every start is either
 #     listed or counted in images_dropped;
-#  d. `patina report` over a and b and a stock run: the one image, in all runs but the stock one.
+#  d. `patina inspect summary` over a and b and a stock run: the one image, in all runs but the stock one.
 #@ tier=quick budget=8 slots=2.5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/08-mixed
@@ -58,10 +58,10 @@ print(f"c. 41 starts of 41 paths: {len(c['images'])} listed, {c['images_dropped'
 sys.exit(not (c["images_dropped"] > 0 and starts + c["images_dropped"] == 41))
 PY
 
-"$PATINA" report --format json "$o"/tree-? "$o/sh" "$o/stock" >"$o/report.json" 2>"$o/report.err" || true
-python3 -I - "$o/report.json" <<'PY' || die "d. patina report: compute $(field "$o/report.json" compute)"
+"$PATINA" inspect summary --format json "$o"/tree-? "$o/sh" "$o/stock" >"$o/report.json" 2>"$o/report.err" || true
+python3 -I - "$o/report.json" <<'PY' || die "d. patina inspect summary: compute $(field "$o/report.json" compute)"
 import json, sys
 c = json.load(open(sys.argv[1]))["compute"]
-print(f"d. patina report: {c['images']} in {c['runs_with_points']} of 6 runs")
+print(f"d. patina inspect summary: {c['images']} in {c['runs_with_points']} of 6 runs")
 sys.exit(not ([i["path"] for i in c["images"]] == ["/guest/compute/mixed"] and c["runs_with_points"] == 5))
 PY

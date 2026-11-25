@@ -73,16 +73,16 @@ def run(name, seed, cmd, *args, flags=()):
 
 
 def report(r):
-    """`patina report --format json` of one run directory."""
-    p = subprocess.run([PATINA, "report", "--format", "json", r.out], capture_output=True, text=True, timeout=60)
+    """`patina inspect summary --format json` of one run directory."""
+    p = subprocess.run([PATINA, "inspect", "summary", "--format", "json", r.out], capture_output=True, text=True, timeout=60)
     try:
         return json.loads(p.stdout)
     except ValueError:
-        die(f"patina report {r.out}: exit {p.returncode} ({p.stderr.strip()[-300:]})")
+        die(f"patina inspect summary {r.out}: exit {p.returncode} ({p.stderr.strip()[-300:]})")
 
 
 def log_ops(r):
     """The boundary log's records, decoded: one line each."""
-    p = subprocess.run([PATINA, "log", "dump", os.path.join(r.out, "boot-1", "boundary.log")],
+    p = subprocess.run([PATINA, "inspect", "dump", os.path.join(r.out, "boot-1", "boundary.log")],
                        capture_output=True, text=True, check=True)
     return p.stdout.splitlines()

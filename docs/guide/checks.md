@@ -60,7 +60,7 @@ into words as a shell would, without expansion; name a shell to get one (`--chec
 | `RUNDIR` | its last argument: `run.json`, `result.json`, `boot-K/stdout`, `boot-K/stderr`, `boot-K/post-crash/` |
 | `PATINA_SEED`, `PATINA_EXIT` | the seed; the program's exit status |
 | `PATINA_CASE`, `PATINA_CASE_ID` | with `--cases`: the case's line and its id |
-| `PATINA` | the `patina` running it, for `"$PATINA" log tree` and `"$PATINA" log events` |
+| `PATINA` | the `patina` running it, for `"$PATINA" inspect tree` and `"$PATINA" inspect events` |
 
 It answers by its exit status:
 
@@ -78,8 +78,8 @@ clock, no network, no reference that moves; a replay that judges differently end
 `check-unstable`. Its output is in `RUNDIR/check.out`.
 
 What it can read: `boot-K/stdout` and `stderr` (boot K: one per start of the program);
-`boot-K/post-crash/`, the files a machine crash left; `patina log tree RUNDIR/boot-K DIR`, the
-disk that start ended with; `patina log events RUNDIR`, everything the program did as JSON
+`boot-K/post-crash/`, the files a machine crash left; `patina inspect tree RUNDIR/boot-K DIR`, the
+disk that start ended with; `patina inspect events RUNDIR`, everything the program did as JSON
 lines (`patina guide failures`).
 
 Here the reference is the faults-off run of seed 1, and `examples/checks/same-tree` compares
@@ -109,7 +109,7 @@ violation check: wrong-output: Files want/out.txt and got/out.txt differ
   faults in every failing run: fs-short      in none: fs-error, fsync-error
   rerun:  patina run --seed 2 --faults disk --check 'examples/checks/same-tree patina-out/ref' --ok-exit 1 -- /tmp/upcase/upcase
   replay: patina replay /tmp/upcase/patina-out/sweep/seed-2
-  explain: patina explain /tmp/upcase/patina-out/sweep/seed-2
+  explain: patina inspect story /tmp/upcase/patina-out/sweep/seed-2
 ```
 
 `examples/checks/` has more: `same-output REF` (stdout and exit status against a reference
@@ -157,5 +157,5 @@ patina run --check 'examples/checks/same-tree patina-out/ref' -- /bin/sh -c 'ech
 A sweep whose check never failed says so (`check: every judged run passed and no --known !ID
 entry shows that this check can fail`). With `--cases`, keep one case that is wrong by
 construction and name it in the `--known` file as `!ID PATTERN`: a sweep in which it does not
-fail ends `vacuous` (`patina guide sweeps`). After changing only the checker, `patina report
---recheck DIR` judges the kept runs again without running them.
+fail ends `vacuous` (`patina guide sweeps`). After changing only the checker, `patina recheck
+DIR` judges the kept runs again without running them.

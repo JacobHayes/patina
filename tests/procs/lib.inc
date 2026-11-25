@@ -47,7 +47,7 @@ native() {
 # counts RUN: processes created and execs, from the boundary log (main + Forked records of
 # processes + VforkStart; Exec records).
 counts() {
-    "$PATINA" log dump "$1/boot-1/boundary.log" | awk '
+    "$PATINA" inspect dump "$1/boot-1/boundary.log" | awk '
         $2 == "sup" && $5 == "Forked" && $9 == "0x1," { p++ }
         $2 == "sup" && $5 == "VforkStart" { p++ }
         $2 == "sup" && $5 == "Exec" { e++ }

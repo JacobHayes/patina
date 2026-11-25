@@ -40,7 +40,7 @@ violation check: acked-record-lost: acknowledged N, N stored after the crash
   faults in every failing run: crash      in none: -
   rerun:  patina run --seed 5 --fault crash-permille=10 --check examples/checks/acked-kept -- /tmp/kvlog/kvlog
   replay: patina replay /tmp/kvlog/patina-out/sweep/seed-5
-  explain: patina explain /tmp/kvlog/patina-out/sweep/seed-5
+  explain: patina inspect story /tmp/kvlog/patina-out/sweep/seed-5
 ```
 
 `./kvlog fixed`, which syncs each record before acknowledging it, is clean under the same sweep.
@@ -116,7 +116,7 @@ crash alone fails the run.
 
 ## Reading a crash
 
-`patina explain RUNDIR` shows the writes, fsyncs and the crash in order, and at the crash which
-files had writes not followed by an fsync. `patina log ops RUNDIR/boot-1` lists every change to
-`/work`; `patina log tree --post-crash RUNDIR/boot-1 DIR` writes the tree the crash left. With
+`patina inspect story RUNDIR` shows the writes, fsyncs and the crash in order, and at the crash which
+files had writes not followed by an fsync. `patina inspect ops RUNDIR/boot-1` lists every change to
+`/work`; `patina inspect tree --post-crash RUNDIR/boot-1 DIR` writes the tree the crash left. With
 several machines each machine's disk crashes on its own (`patina guide machines`).

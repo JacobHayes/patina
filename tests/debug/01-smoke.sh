@@ -53,7 +53,7 @@ GDB_DIES=1 session "$r" "$RUNS/kill.gdb" --at call:write
 identical "$r"
 echo "gdb killed at the stop: identical"
 
-last=$("$PATINA" log events "$r" | python3 -I -c 'import json,sys
+last=$("$PATINA" inspect events "$r" | python3 -I -c 'import json,sys
 print(max(json.loads(l).get("seq", 0) for l in sys.stdin))')
 rm -rf "${r:?}/debug"
 st=0

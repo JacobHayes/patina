@@ -18,7 +18,7 @@ common="ppoll epoll_pwait2 getitimer setitimer rt_sigtimedwait rt_sigqueueinfo r
 if [ "$(uname -m)" = x86_64 ]; then lines=31 calls="select epoll_create pause alarm fork $common"
 else lines=26 calls="epoll_create1 clone $common"; fi
 [ "$(grep -c ' r=' "$s")" -eq $lines ] || die "rows29: guest output incomplete"
-"$PATINA" log dump "$out/rows29/s1-off/repeat/run-0/boot-1/boundary.log" >"$out/rows29.dump"
+"$PATINA" inspect dump "$out/rows29/s1-off/repeat/run-0/boot-1/boundary.log" >"$out/rows29.dump"
 for c in $calls; do
     grep -q " $c \[" "$out/rows29.dump" || die "rows29: no record of $c"
 done

@@ -39,7 +39,7 @@ wait
 elapsed() { sed -n 's/.*elapsed_ns=//p' "$1/boot-1/stdout"; }
 [ "$(field "$o/stock/result.json" outcome)" = ok ] || die "b. stock loop: $(res "$o/stock")"
 [ "$(field "$o/stock/result.json" compute)" = - ] || die "b. a stock run has compute: $(field "$o/stock/result.json" compute)"
-"$PATINA" log dump "$o/stock/boot-1/boundary.log" >"$o/stock.dump"
+"$PATINA" inspect dump "$o/stock/boot-1/boundary.log" >"$o/stock.dump"
 ! grep -q 'patina_sdk\|compute' "$o/stock.dump" || die "b. a stock run's log: $(grep -m1 'patina_sdk\|compute' "$o/stock.dump")"
 t=$(elapsed "$o/stock")
 [ "$t" -lt "$N" ] || die "b. the stock loop of $N iterations took $t virtual ns"

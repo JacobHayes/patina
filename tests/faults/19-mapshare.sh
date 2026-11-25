@@ -5,7 +5,7 @@
 # the old byte; a truncation and extension by one process under another's mapping; more files
 # mapped one after another than Patina keeps shadows of at once): each mode with no crash
 # plane, --faults crash and --faults kill ends ok, its self-check
-# passes, `patina log ops --check` passes, and what the file holds (read(2)) at the end of the last boot is
+# passes, `patina inspect check-ops` passes, and what the file holds (read(2)) at the end of the last boot is
 # what a native run prints. Then a pwrite on a page another process stored to through its
 # mapping: the page is logged whole before the write. More files mapped at once than Patina
 # keeps shadows of end the run unsupported (capacity). A same-seed repeat is identical and
@@ -27,7 +27,7 @@ for m in back back-kill alternate store-write store-writev write-store trunc fil
         [ "$got" = ok ] || die "$m, crash plane $plane: $got $(field "$o/result.json" message)"
         sc=$(jq -r '.self_check.verdict // "-"' "$o/result.json")
         [ "$sc" = "$([ $plane = none ] && echo - || echo pass)" ] || die "$m, crash plane $plane: self-check $sc"
-        "$PATINA" log ops --check "$o" >"$o.check" || die "$m, crash plane $plane: $(cat "$o.check")"
+        "$PATINA" inspect check-ops "$o" >"$o.check" || die "$m, crash plane $plane: $(cat "$o.check")"
         # The last boot's output: a crash restarts the program, which starts over.
         out=$(cat "$o/boot-$(field "$o/result.json" boots)/stdout")
         [ "$out" = "$native" ] || die "$m, crash plane $plane: printed '$out', natively '$native'"
@@ -37,7 +37,7 @@ done
 # A pwrite on a page another process stored to through its mapping: the page, whole, is
 # logged before the write (so the crash model never keeps the write without the stores).
 run "$d/order" 1 -- /guest/mapshare order
-"$PATINA" log events "$d/order" >"$d/order.events"
+"$PATINA" inspect events "$d/order" >"$d/order.events"
 python3 -I - "$d/order.events" <<'PY' || exit 1
 import json, sys
 ops = [e for e in map(json.loads, open(sys.argv[1])) if e.get("type") == "op"]

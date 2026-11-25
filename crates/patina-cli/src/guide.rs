@@ -44,14 +44,15 @@ fn title(text: &str) -> &str {
     text.lines().next().unwrap_or("").trim_start_matches("# ")
 }
 
+pub fn list() -> Result<ExitCode, String> {
+    for t in TOPICS {
+        println!("{:<11} {}", t.name, title(t.text));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 pub fn main(a: &Args) -> Result<ExitCode, String> {
     let md = a.last("--format") == Some("md");
-    if a.has("--list") {
-        for t in TOPICS {
-            println!("{:<11} {}", t.name, title(t.text));
-        }
-        return Ok(ExitCode::SUCCESS);
-    }
     let text = match a.positional.as_slice() {
         [] => CORE,
         [name] => match TOPICS.iter().find(|t| t.name == name) {
@@ -222,23 +223,23 @@ fn inline(s: &str) -> String {
     out
 }
 
-/// `patina skill [DIR]`: write the skill to `DIR/patina/SKILL.md`, replacing an earlier patina
+/// `patina guide skill [DIR]`: write the skill to `DIR/patina/SKILL.md`, replacing an earlier patina
 /// skill there; with no DIR, say where to put it.
 pub fn skill(a: &Args) -> Result<ExitCode, String> {
     let dir = match a.positional.as_slice() {
         [] => {
             print!(
-                "patina skill DIR writes the skill for coding agents to DIR/patina/SKILL.md.\n\
+                "patina guide skill DIR writes the skill for coding agents to DIR/patina/SKILL.md.\n\
                  Give it the skills directory your agent reads, for example:\n\
-                 \x20 patina skill ~/.agents/skills     for every project of this user\n\
-                 \x20 patina skill .agents/skills       for this project only\n\
+                 \x20 patina guide skill ~/.agents/skills     for every project of this user\n\
+                 \x20 patina guide skill .agents/skills       for this project only\n\
                  The skill tells an agent when to use Patina and to run `patina guide`, which\n\
                  is versioned with this binary: it rarely needs writing again.\n"
             );
             return Ok(ExitCode::SUCCESS);
         }
         [d] => Path::new(d).join("patina"),
-        _ => return Err("one directory: patina skill DIR".into()),
+        _ => return Err("one directory: patina guide skill DIR".into()),
     };
     if dir.exists() {
         // Only a patina skill is replaced: never another directory that happens to be there.

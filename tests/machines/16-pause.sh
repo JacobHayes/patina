@@ -17,7 +17,7 @@ rm -f "$o/b.toml"; conf "$o/b.toml" b python3 /guest/pause.py b
 run_ok "$o/script" 1 --config "$o/b.toml" -- python3 /guest/pause.py main script
 sed 's/^/    /' "$o/script/boot-1/stdout"
 [ "$(field "$o/script/result.json" machines.list.1.pauses)" = 3 ] || die "b's pauses: $(field "$o/script/result.json" machines.list.1)"
-n=$("$PATINA" log events "$o/script" --types machine | grep -c '"event":"pause","name":"b".*"by":"script"')
+n=$("$PATINA" inspect events "$o/script" --types machine | grep -c '"event":"pause","name":"b".*"by":"script"')
 [ "$n" = 3 ] || die "pause events of b: $n"
 
 # The seed's pauses of b.
@@ -28,7 +28,7 @@ r=$o/seed/run-0
 p=$(field "$r/result.json" machines.list.1.pauses)
 [ "$p" -ge 2 ] || die "the seed's pauses of b: $p"
 [ "$(field "$r/result.json" faults.counts.pause.injected)" = "$p" ] || die "faults.counts.pause: $(field "$r/result.json" faults.counts)"
-n=$("$PATINA" log events "$r" --types machine | grep -c '"event":"resume","name":"b".*"by":"seed"')
+n=$("$PATINA" inspect events "$r" --types machine | grep -c '"event":"resume","name":"b".*"by":"seed"')
 [ "$n" -ge $((p - 1)) ] || die "resume events of b: $n of $p pauses"
 "$PATINA" replay "$r" >"$o/replay.txt" 2>&1 || { tail -5 "$o/replay.txt"; die "replay of a run with pauses"; }
 echo "seed: $p pauses of b, $(field "$r/result.json" machines.list.1.paused_ms) ms paused; replayed identically"

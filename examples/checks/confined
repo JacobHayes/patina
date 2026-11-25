@@ -6,7 +6,7 @@
 # followed): a dynamically linked program needs -r for what its loader and libraries open
 # (-r /usr -r /lib -r /etc -r /dev -r /proc, as it does). A read-only open of a directory
 # above a ROOT (to fsync it after a create or rename there) is allowed; a write or any other
-# open outside is not. Reads `patina log events`. For `patina run --check`.
+# open outside is not. Reads `patina inspect events`. For `patina run --check`.
 set -eu
 roots=; reads=
 while [ $# -gt 1 ]; do
@@ -19,7 +19,7 @@ while [ $# -gt 1 ]; do
 done
 run=$1
 list() { printf '%s' "$1" | jq -Rsc 'split("\n")[:-1] | map(if . == "/" then . else rtrimstr("/") end)'; }
-bad=$({ "${PATINA:-patina}" log events "$run" --types op,call || echo '"patina log events failed"'; } | jq -rn --argjson roots "$(list "$roots")" --argjson reads "$(list "$roots$reads")" '
+bad=$({ "${PATINA:-patina}" inspect events "$run" --types op,call || echo '"patina inspect events failed"'; } | jq -rn --argjson roots "$(list "$roots")" --argjson reads "$(list "$roots$reads")" '
   def outside($l): . as $p | all($l[]; . as $r | $p != $r and ($p | startswith($r + "/") | not));
   def above($l): . as $p | any($l[]; startswith(if $p == "/" then "/" else $p + "/" end));
   def bit($n; $b): ($n / $b | floor) % 2 == 1;

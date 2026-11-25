@@ -1,4 +1,4 @@
-/* paths MODE: path strings for the log's paths (`patina log events`) (built static: no library opens).
+/* paths MODE: path strings for the log's paths (`patina inspect events`) (built static: no library opens).
  *   tour           creates data/a.txt and the symlink link -> data, reads link/a.txt, stats
  *                  /etc/passwd, looks up a 300-byte path, runs /bin/true x y
  *   edges          opens a path at a bad pointer (EFAULT), one ending at the end of a mapping,

@@ -62,7 +62,7 @@ The seed's faults act in one window of the run, and the test says where it opens
 - **It opens when every machine is ready.** A machine's `ready` probe is a command Patina runs on
   it every 100 ms of virtual time until it exits 0 (`patina guide machines`); a machine without
   one is ready when it starts, so with no probe the window is open from the start. A server
-  takes `ready = "patina wait :7000"`; a test whose own setup must finish first puts a probe on
+  takes `ready = "patina ctl wait :7000"`; a test whose own setup must finish first puts a probe on
   main, `[machine.main] ready = "test -e /tmp/setup-done"`, and creates the file when the setup
   is done. Crash points count only inside the window, so `--crash-points` and `minimize` crash
   only the work.
@@ -81,13 +81,13 @@ A client and a server on one machine, the faults held until the server listens:
 <!-- transcript settle-one
 dir: /tmp/settle-one
 setup: mkdir g && cp "$GUESTS/phases.py" g/
-setup: printf '[machine.main]\nready = "patina wait :7000"\n' >patina.toml
+setup: printf '[machine.main]\nready = "patina ctl wait :7000"\n' >patina.toml
 exact-only: the faults one seed draws
 -->
 ```text
 $ cat patina.toml
 [machine.main]
-ready = "patina wait :7000"
+ready = "patina ctl wait :7000"
 $ patina run --mount g:/guest:copy --faults disk,net -- sh -c 'python3 /guest/phases.py serve & python3 /guest/phases.py work 20 127.0.0.1 && patina ctl settle && python3 /guest/phases.py check 20 127.0.0.1'
 ok (exit): the program exited 0
 guest: exit 0
@@ -115,11 +115,11 @@ faults = false
 
 [machine.primary]
 run   = "./db --role primary --peer standby"
-ready = "patina wait :5432"
+ready = "patina ctl wait :5432"
 
 [machine.standby]
 run   = "./db --role standby --peer primary"
-ready = "patina wait :5432"
+ready = "patina ctl wait :5432"
 TOML
 cat >test.sh <<'SH'
 ./workload primary,standby || exit

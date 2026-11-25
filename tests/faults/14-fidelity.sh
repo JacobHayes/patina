@@ -10,7 +10,7 @@ rm -rf "${o:?}"; mkdir -p "$(dirname "$o")"
 timeout 300 "$PATINA" run --seed 1 --config "$("$PATINA_CFG" cpus=2)" --out "$o" --mount "$PATINA_WORKLOADS/go-static":/guest:copy \
     --fault fs-error-permille=1000 --fault fs-short-permille=300 -- /guest/go-static local >/dev/null 2>&1 \
     || [ -f "$o/result.json" ] || die "go-static: no result.json"
-"$PATINA" log dump "$o/boot-1/boundary.log" >"$o.dump"
+"$PATINA" inspect dump "$o/boot-1/boundary.log" >"$o.dump"
 python3 -I - "$o/result.json" "$o.dump" <<'PY' || exit 1
 import json, re, sys
 r = json.load(open(sys.argv[1]))

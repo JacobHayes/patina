@@ -3,7 +3,7 @@
 #    the same seed's replay (which writes the trees whole, and must be identical), `log tree` of
 #    every boot and machine disk, `log tree --post-crash` of every crash, `log ops --check`
 #    and `log events` (what a machine crash lost). In a run a checker judged, `post-crash/`
-#    stays whole: the checker run by hand, `report --recheck --check` with a checker run per run and with one that serves read
+#    stays whole: the checker run by hand, `recheck --check` with a checker run per run and with one that serves read
 #    what the replay's post-crash/ holds. The packed trees are smaller than the trees by a wide
 #    margin, the sweep's "kept" line is the bytes left under its directory, and `--keep all`
 #    keeps the trees as the run wrote them.
@@ -64,19 +64,19 @@ same() {
     n=0 p=0
     for inc in $(cd "$raw" && find . -name live.tree -printf '%h\n' | LC_ALL=C sort); do
         rm -rf t-a t-b
-        "$PATINA" log tree "$r/$inc" t-a || die "log tree $r/$inc"
-        "$PATINA" log tree "$raw/$inc" t-b || die "log tree $raw/$inc"
+        "$PATINA" inspect tree "$r/$inc" t-a || die "log tree $r/$inc"
+        "$PATINA" inspect tree "$raw/$inc" t-b || die "log tree $raw/$inc"
         diff -r t-a t-b >/dev/null || die "log tree $r/$inc differs from its replay's"
         n=$((n + 1))
         [ -d "$raw/$inc/post-crash" ] || continue
         rm -rf t-a
-        "$PATINA" log tree --post-crash "$r/$inc" t-a || die "log tree --post-crash $r/$inc"
+        "$PATINA" inspect tree --post-crash "$r/$inc" t-a || die "log tree --post-crash $r/$inc"
         diff -r t-a "$raw/$inc/post-crash" >/dev/null || die "log tree --post-crash $r/$inc differs from its replay's post-crash/"
         p=$((p + 1))
     done
     [ "$p" -ge 1 ] || die "$raw: no post-crash tree"
-    "$PATINA" log ops --check "$r" >"$raw.ops" 2>&1 || die "log ops --check $r: $(tail -2 "$raw.ops")"
-    "$PATINA" log events "$r" >"$raw.ev.a" && "$PATINA" log events "$raw" >"$raw.ev.b" || die "log events $r"
+    "$PATINA" inspect check-ops "$r" >"$raw.ops" 2>&1 || die "log ops --check $r: $(tail -2 "$raw.ops")"
+    "$PATINA" inspect events "$r" >"$raw.ev.a" && "$PATINA" inspect events "$raw" >"$raw.ev.b" || die "log events $r"
     cmp -s "$raw.ev.a" "$raw.ev.b" || die "log events of $r differ from its replay's: $(diff "$raw.ev.a" "$raw.ev.b" | head -4)"
     echo "$n trees and $p post-crash trees read as the replay wrote them"
 }
@@ -112,7 +112,7 @@ rc=0; line=$(./judge "$run") || rc=$?
 [ "$rc $line" = "1 $want" ] || die "the checker by hand: exit $rc, '$line'; the replay's post-crash/ is '$want'"
 for k in ./judge ./serve; do
     rc=0
-    "$PATINA" report --recheck --check "$k" "$run" >recheck.txt 2>&1 || rc=$?
+    "$PATINA" recheck --check "$k" "$run" >recheck.txt 2>&1 || rc=$?
     got=$(jq -r '"\(.check.label): \(.check.detail)"' "$run/result.json")
     [ "$got" = "$want" ] || die "recheck --check $k: the checker read '$got', the replay's post-crash/ is '$want' (exit $rc: $(tail -2 recheck.txt))"
 done

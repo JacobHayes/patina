@@ -88,7 +88,7 @@ for r in shlib-1 shlib-2 shlib-stock; do
     [ "$im" = "$want 1" ] || die "d. $r: images and starts $im, not $want 1"
 done
 # The program, libcomp.so, and libcompdl.so once per dlopen: four hook copies, one cell.
-"$PATINA" log dump "$o/shlib-1/boot-1/boundary.log" | sed -n 's/.* patina_sdk .*args=\[0x8, .*ret=\([0-9]*\) .*/\1/p' >"$o/shlib.hellos"
+"$PATINA" inspect dump "$o/shlib-1/boot-1/boundary.log" | sed -n 's/.* patina_sdk .*args=\[0x8, .*ret=\([0-9]*\) .*/\1/p' >"$o/shlib.hellos"
 [ "$(wc -l <"$o/shlib.hellos")" = 4 ] || die "d. shlib: $(wc -l <"$o/shlib.hellos") hellos, not one per hook copy loaded"
 [ "$(sort -u "$o/shlib.hellos" | wc -l)" = 1 ] || die "d. shlib: the hellos got more than one cell: $(sort -u "$o/shlib.hellos" | paste -sd' ')"
 lhs=$(field "$o/shlib-1/result.json" digest); rhs=$(field "$o/shlib-2/result.json" digest)

@@ -12,7 +12,7 @@
     ack2.py main N [wait]  put 1..N through a, then read both logs back; with `wait`, first
                              wait for b to answer a `get`
 
-A test gives a and b the probe `ready = "patina wait :7000"`: the faults begin once both serve.
+A test gives a and b the probe `ready = "patina ctl wait :7000"`: the faults begin once both serve.
 
 A machine recovers its log on every boot and ignores a `put` it already holds, so a put sent
 again after a crash is applied once. A machine serves each connection in a thread of its own, one

@@ -24,7 +24,7 @@ o = json.load(open(sys.argv[2] + "/result.json"))
 print("%s\t%s\t%s" % (sys.argv[1], o["outcome"], ",".join(o.get("refused", []))))
 PY
     for inc in "$d"/boot-*; do
-        "$PATINA" log dump "$inc/boundary.log"
+        "$PATINA" inspect dump "$inc/boundary.log"
     done | python3 -I -c '
 import collections, re, sys
 n = sys.argv[1]

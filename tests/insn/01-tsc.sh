@@ -15,7 +15,7 @@ grep -qx 'OK tsc' "$o/v/run-0/boot-1/stdout" || die "guest checks failed: $(grep
 for k in $reads; do
     [ "$(field "$o/v/run-0/result.json" "counters.insn.emulated.$k")" -ge 1000 ] || die "fewer than 1000 $k emulations"
 done
-n=$("$PATINA" log dump "$o/v/run-0/boot-1/boundary.log" | grep -c ' insn ')
+n=$("$PATINA" inspect dump "$o/v/run-0/boot-1/boundary.log" | grep -c ' insn ')
 echo "insn records in the boundary log: $n; emulated $(field "$o/v/run-0/result.json" counters.insn.emulated)"
 [ "$n" -ge 2000 ] || die "only $n insn records"
 trim "$o/v"

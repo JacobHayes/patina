@@ -23,7 +23,7 @@ done
 sed 's/^/    /' "$o/crash/boot-1/stdout"
 [ "${lost:-0}" -ge 1 ] || die "no unsynced write was lost in 5 machine crashes of seeds 1-$FIND_SEEDS"
 echo "seed $seed loses an unsynced write"
-n=$("$PATINA" log events "$o/crash" --types machine | grep -c '"event":"machine-crash","name":"a".*"by":"script"')
+n=$("$PATINA" inspect events "$o/crash" --types machine | grep -c '"event":"machine-crash","name":"a".*"by":"script"')
 [ "$n" = 5 ] || die "machine-crash events of a: $n"
 rm -f "$o/s.toml"; conf "$o/s.toml" b python3 -c "import os, socket, time; socket.socket(socket.AF_UNIX).bind('/work/sock'); os.fsync(os.open('/work', os.O_RDONLY)); time.sleep(30)"
 run_ok "$o/sock" 1 --config "$o/s.toml" -- python3 -c "import sys, time; sys.path.insert(0, '/guest'); import patina; time.sleep(1); patina.control('crash b'); patina.control('start b'); time.sleep(1)"

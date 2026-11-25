@@ -1098,7 +1098,7 @@ pub fn print_human(r: &Value, dir: &Path) {
     println!("run directory: {}", dir.display());
     println!("replay: patina replay {}", dir.display());
     if r["exit"] == 1 {
-        println!("explain: patina explain {}", dir.display());
+        println!("explain: patina inspect story {}", dir.display());
     }
 }
 

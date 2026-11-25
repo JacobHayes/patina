@@ -1,7 +1,7 @@
 # 20. Machines: `ready` probes (sup::ready). A slow-starting server (slow.py: 20 synced writes,
 # 0.1 s apart, before it serves phases.py's store; a failed one ends it) under fsync errors.
 # Without a probe the seed's faults reach its start: a search of seeds finds a run where the
-# server ended at its start. With `ready = "patina wait :7000"` none does over the same seeds:
+# server ended at its start. With `ready = "patina ctl wait :7000"` none does over the same seeds:
 # every run is ok and no fault comes before the event that opens the window; the server's first
 # ready time is in result.json, and replay is identical. Crash points count only after ready:
 # `crash-at=1@srv` crashes it after its ready time (without the probe, during its start). A
@@ -17,7 +17,7 @@ rm -f "$o"/*.toml
 # ready.toml add main, unfaulted: it runs only the test.
 conf "$o/srv.toml" srv python3 /guest/slow.py
 cp "$o/srv.toml" "$o/srv-ready.toml"
-echo 'ready = "patina wait :7000"' >>"$o/srv-ready.toml"
+echo 'ready = "patina ctl wait :7000"' >>"$o/srv-ready.toml"
 cp "$o/srv.toml" "$o/plain.toml"; main_unfaulted "$o/plain.toml"
 cp "$o/srv-ready.toml" "$o/ready.toml"; main_unfaulted "$o/ready.toml"
 F=(--fault fsync-error-permille=50)
@@ -36,7 +36,7 @@ echo "without ready: seed $s ended the server at its start"
 # With it, seeds 1..s: ok, no fault before the window opened.
 for k in $(seq 1 $s); do
     run_ok "$o/ready-$k" $k --config "$o/ready.toml" "${F[@]}" -- "${W[@]}"
-    "$PATINA" log events "$o/ready-$k" --types machine,fault,crash >"$o/ready-$k.ev" || die "log events"
+    "$PATINA" inspect events "$o/ready-$k" --types machine,fault,crash >"$o/ready-$k.ev" || die "log events"
     python3 -I - "$o/ready-$k.ev" <<'PY' || die "seed $k: a fault before the window opened"
 import json, sys
 opened = None
@@ -66,7 +66,7 @@ r=$(field "$o/at-ready/result.json" ready.srv)
 echo "crash-at=1: at $p ms without ready, $a ms with (ready at $r ms)"
 
 # A probe on main alone.
-printf '[machine.main]\nready = "patina wait :7000"\n' >"$o/main.toml"
+printf '[machine.main]\nready = "patina ctl wait :7000"\n' >"$o/main.toml"
 for k in $(seq 1 $s); do
     run_ok "$o/main-$k" $k --config "$o/main.toml" "${F[@]}" -- sh -c 'python3 /guest/slow.py & python3 /guest/phases.py work 5 127.0.0.1'
 done
@@ -94,7 +94,7 @@ echo "a probe that never passes: error (ready), naming srv"
 # A runner killed while its machine waits: the probe runs again, and the machine is ready.
 cp "$o/srv.toml" "$o/kick.toml"
 cat >>"$o/kick.toml" <<'EOF'
-ready = ["sh", "-c", "test -e /work/kicked || { touch /work/kicked; kill -9 $PPID; }; exec patina wait :7000"]
+ready = ["sh", "-c", "test -e /work/kicked || { touch /work/kicked; kill -9 $PPID; }; exec patina ctl wait :7000"]
 EOF
 main_unfaulted "$o/kick.toml"
 run_ok "$o/kick" 1 --config "$o/kick.toml" -- "${W[@]}"

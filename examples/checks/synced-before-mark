@@ -1,11 +1,11 @@
 #!/bin/sh
 # synced-before-mark FILE PREFIX RUN: when the program marks an acknowledgement (SDK `mark`
 # with a label starting PREFIX, as "ack 17"), no write to FILE (/work/data.log) is still
-# unsynced. Other marks are ignored. Reads the `op` and `mark` events of `patina log events`.
+# unsynced. Other marks are ignored. Reads the `op` and `mark` events of `patina inspect events`.
 # For `patina run --check`.
 set -eu
 file=$1 prefix=$2 run=$3
-bad=$({ "${PATINA:-patina}" log events "$run" --types boot,op,mark || echo '"patina log events failed"'; } | jq -rn --arg f "$file" --arg p "$prefix" '
+bad=$({ "${PATINA:-patina}" inspect events "$run" --types boot,op,mark || echo '"patina inspect events failed"'; } | jq -rn --arg f "$file" --arg p "$prefix" '
   first(foreach (inputs | if type == "string" then error(.) else . end) as $e ({dirty: false};
       if $e.type == "boot" then .dirty = false
       elif $e.type == "op" and $e.path == $f and ($e.op | IN("write", "truncate", "fallocate", "mmap-dirty")) then .dirty = true

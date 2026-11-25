@@ -1,5 +1,5 @@
 # Paths in the log: each call's C-string arguments as passed (`path`, `path2`), the path each walked
-# argument resolves to (`resolved`) and execve's arguments (`argv`) in `patina log events`.
+# argument resolves to (`resolved`) and execve's arguments (`argv`) in `patina inspect events`.
 # A tour: an open through the symlink link -> data shows link/a.txt as passed and
 # /work/data/a.txt resolved, a stat its path, a 300-byte path comes back whole, an exec its
 # argv; a path at a bad pointer or running past a mapping (EFAULT) has none, one ending at the
@@ -20,7 +20,7 @@ die() { echo "FAIL: $*"; exit 1; }
 cd "$RUNS"
 export PATINA
 
-ev() { "$PATINA" log events "$1" --types call | jq -c "select(.type == \"call\") | $2"; }
+ev() { "$PATINA" inspect events "$1" --types call | jq -c "select(.type == \"call\") | $2"; }
 "$PATINA" run --out tour -- "$paths" tour >tour.txt 2>&1 || die "tour: $(tail -2 tour.txt)"
 [ "$(ev tour 'select(.name == "openat" and .path == "link/a.txt") | .resolved')" = '"/work/data/a.txt"' ] || die "the open through link: $(ev tour 'select(.path == "link/a.txt")')"
 ev tour 'select(.path == "/etc/passwd") | .resolved' | grep -qx '"/etc/passwd"' || die "the stat of /etc/passwd"

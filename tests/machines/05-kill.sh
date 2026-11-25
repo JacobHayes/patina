@@ -18,9 +18,9 @@ sed 's/^/    /' "$o/kill/boot-1/stdout"
 [ "$(field "$o/kill/result.json" machines.list.1.boots)" = $((k + 1)) ] || die "b: $(field "$o/kill/result.json" machines.list.1)"
 hows=$(jq -r '[.machines.list[1].downs[].how] | unique | join(" ")' "$o/kill/result.json")
 [ "$hows" = "killed by script" ] || die "b's downs: $hows"
-n=$("$PATINA" log events "$o/kill" --types machine | grep -c '"event":"kill","name":"b".*"by":"script"')
+n=$("$PATINA" inspect events "$o/kill" --types machine | grep -c '"event":"kill","name":"b".*"by":"script"')
 [ "$n" = $k ] || die "kill events of b: $n"
-n=$("$PATINA" log events "$o/kill" --types machine | grep -c '"event":"start","name":"b".*"machine_boot"')
+n=$("$PATINA" inspect events "$o/kill" --types machine | grep -c '"event":"start","name":"b".*"machine_boot"')
 [ "$n" = $k ] || die "restart events of b: $n"
 for i in 1 $k $((k + 1)); do
     grep -q "^b: start $i, boot $i\$" "$o/kill/machine/b/boot-$i/stdout" \

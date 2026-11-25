@@ -236,7 +236,7 @@ pub fn main(a: &Args) -> Result<ExitCode, crate::Fail> {
     let err = crate::error;
     if a.positional.is_empty() {
         return Err(err(
-            "usage: patina report --recheck [--check 'CMD ARGS'] DIR...".into(),
+            "usage: patina recheck [--check 'CMD ARGS'] DIR...".into()
         ));
     }
     let dirs: Vec<PathBuf> = a.positional.iter().map(PathBuf::from).collect();
@@ -332,7 +332,7 @@ pub fn main(a: &Args) -> Result<ExitCode, crate::Fail> {
     // The report over the runs as they are now.
     let runs = crate::report::collect(&dirs).map_err(err)?;
     let known = crate::report::known_flag(a).map_err(err)?;
-    let mut again = "patina report --group N".to_string();
+    let mut again = "patina inspect summary --group N".to_string();
     if let Some(k) = a.last("--known") {
         again.push_str(&format!(" --known {}", crate::report::quote(k)));
     }

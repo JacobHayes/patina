@@ -4,7 +4,7 @@
 # seed-$PATINA_SEED is the reference. Each side's last boot is compared. A run that
 # failed cleanly (an --ok-exit status) is not judged. A reference made from other input
 # (same-input.sh) is an error, not a finding; --relax FIELD compares anyway. For `patina run
-# --check`; uses `patina log tree` and jq.
+# --check`; uses `patina inspect tree` and jq.
 set -u # lint-allow: strict-line — no set -e: exit 1 is a finding, so a command that fails exits 2 (error) itself
 . "$(dirname "$0")/same-input.sh"
 relax=
@@ -16,7 +16,7 @@ same_input "$ref" "$2" $relax || exit 2
 last() { k=1; while [ -d "$1/boot-$((k + 1))" ]; do k=$((k + 1)); done; echo "$1/boot-$k"; }
 t=$(mktemp -d) || exit 2
 trap 'rm -rf "${t:?}"' EXIT
-"${PATINA:-patina}" log tree "$(last "$ref")" "$t/want" && "${PATINA:-patina}" log tree "$(last "$2")" "$t/got" || exit 2
+"${PATINA:-patina}" inspect tree "$(last "$ref")" "$t/want" && "${PATINA:-patina}" inspect tree "$(last "$2")" "$t/got" || exit 2
 diff -rq --no-dereference "$t/want" "$t/got" >"$t/diff"
 case $? in 0) exit 0 ;; 1) ;; *) cat "$t/diff"; exit 2 ;; esac
 echo "wrong-output: $(head -n1 "$t/diff" | sed "s|$t/||g")"

@@ -50,7 +50,7 @@ system:
 <!-- transcript machines-settle
 dir: /tmp/settle
 setup: mkdir g && cp "$GUESTS/phases.py" g/
-setup: printf '[machine.main]\nfaults = false\n\n[machine.a]\nrun = ["python3", "/guest/phases.py", "serve"]\nready = "patina wait :7000"\n\n[machine.b]\nrun = ["python3", "/guest/phases.py", "serve", "lazy"]\nready = "patina wait :7000"\n' >patina.toml
+setup: printf '[machine.main]\nfaults = false\n\n[machine.a]\nrun = ["python3", "/guest/phases.py", "serve"]\nready = "patina ctl wait :7000"\n\n[machine.b]\nrun = ["python3", "/guest/phases.py", "serve", "lazy"]\nready = "patina ctl wait :7000"\n' >patina.toml
 exit: 0 1
 exact-only: one seed's run
 -->
@@ -61,11 +61,11 @@ faults = false
 
 [machine.a]
 run = ["python3", "/guest/phases.py", "serve"]
-ready = "patina wait :7000"
+ready = "patina ctl wait :7000"
 
 [machine.b]
 run = ["python3", "/guest/phases.py", "serve", "lazy"]
-ready = "patina wait :7000"
+ready = "patina ctl wait :7000"
 $ patina run --seed 5 --mount g:/guest:copy --faults crash --fault crash-gap-ms=1000..4000 --fault max-boots=8 -- sh -c 'python3 /guest/phases.py work 10 a b && patina ctl settle && python3 /guest/phases.py check 10 a b'
 failure (exit): exit status 1
 guest: exit 1
@@ -80,7 +80,7 @@ last injected:
   seq 5124 t=101779ms crash machine=b kind=machine object=/work/log lost: 1 missing, 0 changed, 0 back
 run directory: /tmp/settle/patina-out/run-5
 replay: patina replay /tmp/settle/patina-out/run-5
-explain: patina explain /tmp/settle/patina-out/run-5
+explain: patina inspect story /tmp/settle/patina-out/run-5
 ```
 
 `phases.py` (in `tests/guests/machines`) stores puts; `work` puts 1 to 10 on both machines and
@@ -103,20 +103,20 @@ only from its own. A machine's output is in `RUNDIR/machine/NAME/boot-K/`. Up to
 A server needs a moment before it serves. `ready = "CMD ARGS"` in a machine's table is a probe
 Patina runs on that machine, from its first boot, every 100 ms of virtual time until it exits 0.
 Main's command starts, and the seed's faults begin, when every machine is ready; a machine
-without a probe is ready when it starts. `patina wait HOST:PORT` is a probe for a server: one TCP
+without a probe is ready when it starts. `patina ctl wait HOST:PORT` is a probe for a server: one TCP
 connect, exit 0 when it is accepted (`:PORT` is the machine's own port).
 
 <!-- transcript machines-ready
 dir: /tmp/ready
 setup: mkdir g && cp "$GUESTS/phases.py" "$GUESTS/slow.py" g/
-setup: printf '[machine.srv]\nrun = ["python3", "/guest/slow.py"]\nready = "patina wait :7000"\n' >patina.toml
+setup: printf '[machine.srv]\nrun = ["python3", "/guest/slow.py"]\nready = "patina ctl wait :7000"\n' >patina.toml
 exit: 0 0 0 1
 -->
 ```text
 $ cat patina.toml
 [machine.srv]
 run = ["python3", "/guest/slow.py"]
-ready = "patina wait :7000"
+ready = "patina ctl wait :7000"
 $ patina sweep --seeds 1..8 --mount g:/guest:copy --fault fsync-error-permille=50 -- python3 /guest/phases.py work 5 srv
 sweep: 70.0 KiB kept in /tmp/ready/patina-out/sweep
 patina sweep: 8 runs, 0 findings in 0 groups, 8 ok   (0.2s, 8 jobs)
@@ -139,7 +139,7 @@ time (ms) each machine was first ready.
 A probe on main holds the faults, not main's command, until it passes: a test whose own setup
 must finish first writes `[machine.main] ready = "test -e /tmp/setup-done"` and creates the file
 when done; a client and server on main alone (`-- sh -c './server & ./client'`) take
-`[machine.main] ready = "patina wait :7000"`. Probes run at the first boot and again at `settle`;
+`[machine.main] ready = "patina ctl wait :7000"`. Probes run at the first boot and again at `settle`;
 after a restart in between nobody is told: clients retry.
 
 A probe that has not passed 60 s of virtual time after boot, or a machine whose `run` ends before
@@ -176,6 +176,7 @@ but `settle` is refused), or the SDK's `control("WORDS")`.
 | `pause NAME`, `resume NAME` | freeze the machine and let it run again |
 | `clock NAME +90s` | move the machine's realtime clock |
 | `settle [SECONDS]` | end the seed's faults and wait until every machine is ready (above) |
+| `wait HOST:PORT` | one TCP connect, exit 0 when accepted (a `ready` probe for a server) |
 
 A set is machine names joined by commas (`main` included), or `rest`. A cut holds TCP data, as a
 pulled cable does, until a heal or the sender's timeout; datagrams across it are lost.
@@ -231,7 +232,7 @@ point.
 release-only: a sweep of a seed's 30 crash points
 dir: /tmp/ack2
 setup: mkdir g && cp "$GUESTS/ack2.py" "$GUESTS/patina.py" g/
-setup: printf '[machine.main]\nfaults = false\n[machine.a]\nrun = ["python3", "/guest/ack2.py", "a"]\nready = "patina wait :7000"\n[machine.b]\nrun = ["python3", "/guest/ack2.py", "b", "early"]\nready = "patina wait :7000"\n' >patina.toml
+setup: printf '[machine.main]\nfaults = false\n[machine.a]\nrun = ["python3", "/guest/ack2.py", "a"]\nready = "patina ctl wait :7000"\n[machine.b]\nrun = ["python3", "/guest/ack2.py", "b", "early"]\nready = "patina ctl wait :7000"\n' >patina.toml
 exit: 1
 -->
 ```text
@@ -243,11 +244,11 @@ crash points: 30 of 30 tried (a 15 of 15, b 15 of 15)
 
 `ack2.py` forwards each put from machine a to b and acknowledges it once b answers; with `early`, b
 answers before its `fsync`, and a crash of b loses an acknowledged put. Both machines have
-`ready = "patina wait :7000"`, so the points count once both serve: only the puts' points.
+`ready = "patina ctl wait :7000"`, so the points count once both serve: only the puts' points.
 
 ## In the logs
 
 `result.json`'s `machines` lists each machine with its address, boots and downs (how, when, for
-how long, what its disk lost), its pauses and clock, and the partitions. `patina log events`
-names each thread's machine and adds `machine` and `net` events; `patina explain` tells the story by
+how long, what its disk lost), its pauses and clock, and the partitions. `patina inspect events`
+names each thread's machine and adds `machine` and `net` events; `patina inspect story` tells the story by
 machine. Seeds, `replay` and `verify` work as on one machine: one scheduler, one clock, one log.

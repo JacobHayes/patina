@@ -21,7 +21,7 @@ done
 # after_settle DIR: the seed's faults and downs after the settle point (none expected), one per line.
 after_settle() {
     s=$(field "$1/result.json" settle.seq)
-    "$PATINA" log events "$1" --types machine,fault,crash,net >"$1.ev" || die "log events $1"
+    "$PATINA" inspect events "$1" --types machine,fault,crash,net >"$1.ev" || die "log events $1"
     jq -c --argjson s "$s" 'select(.seq != null and .seq > $s and (.type == "fault" or .type == "crash" or .by == "seed"))' "$1.ev"
 }
 
@@ -65,7 +65,7 @@ K="--config $o/ok.toml --faults kill@b --fault crash-gap-ms=500..1000 --fault do
 run_ok "$o/boot" 1 $K -- sh -c 'sleep 3; patina ctl settle && python3 /guest/phases.py check 0 a b'  # lint-allow: sleep — the guest's, in virtual time
 [ "$(field "$o/boot/result.json" machines.list.2.boots)" = 2 ] || die "b's boots: $(field "$o/boot/result.json" machines.list.2)"
 t=$(field "$o/boot/result.json" settle.vclock_ns)
-"$PATINA" log events "$o/boot" --types machine >"$o/boot.ev"
+"$PATINA" inspect events "$o/boot" --types machine >"$o/boot.ev"
 jq -e -s --argjson t "$t" 'any(.[]; .event == "start" and .name == "b" and .machine_boot == 2 and .t - $t < 1000000000)' "$o/boot.ev" >/dev/null \
     || die "b did not boot at settle: $(grep '"b"' "$o/boot.ev")"
 "$PATINA" replay "$o/boot" >"$o/replay.txt" 2>&1 && grep -q '^identical' "$o/replay.txt" || die "replay: $(head -3 "$o/replay.txt")"

@@ -16,10 +16,10 @@ done
 main_unfaulted "$o/loop.toml"
 check_disks() {
     [ "$(field "$1/result.json" self_check.verdict)" = pass ] || die "$1: self-check: $(field "$1/result.json" self_check)"
-    k=$("$PATINA" log ops "$1/boot-1" | awk '/MmapDirty/ { c++ } END { print c + 0 }')
+    k=$("$PATINA" inspect ops "$1/boot-1" | awk '/MmapDirty/ { c++ } END { print c + 0 }')
     [ "$k" = 0 ] || die "$1: main's log holds a machine's stores"
     for n in a b c d; do
-        k=$("$PATINA" log ops "$1/machine/$n/boot-1" | awk '/MmapDirty/ { c++ } END { print c + 0 }')
+        k=$("$PATINA" inspect ops "$1/machine/$n/boot-1" | awk '/MmapDirty/ { c++ } END { print c + 0 }')
         [ "$k" -gt 0 ] || die "$1: machine $n's stores are not in its log"
     done
 }
@@ -34,6 +34,6 @@ fi
 run_ok "$o/machine" 3 --config "$o/loop.toml" --faults crash --fault crash-gap-ms=5..50 --fault down-ms=10..50 -- sleep 0.15
 check_disks "$o/machine"
 disks=$(ls -d "$o"/machine/machine/*/boot-* | while read -r d; do [ -f "$d/oplog.meta" ] && echo "$d"; done | wc -l)
-ended=$(for d in "$o"/machine/machine/*/boot-*; do [ -f "$d/oplog.meta" ] && "$PATINA" log ops "$d" | tail -1; done | grep -c ' Crash ')
+ended=$(for d in "$o"/machine/machine/*/boot-*; do [ -f "$d/oplog.meta" ] && "$PATINA" inspect ops "$d" | tail -1; done | grep -c ' Crash ')
 [ "$ended" -ge 4 ] || die "machine crashes: only $ended disks end with a Crash record"
 echo "shared-mapping stores logged per machine, self-check passes on every disk: plain, machine crashes ($disks disks, $ended ended by a crash)$([ "${CHECK_TIER:-}" = quick ] || echo ", process kills")"
