@@ -1555,6 +1555,13 @@ pub fn run_boot(
         }
     }
     drop(machine_stdio);
+    // Truncate preallocated oplog files back to their written lengths before any reader sees them.
+    opmeta
+        .set_len(ctl.oplog_len.load(Relaxed))
+        .map_err(|e| format!("truncate oplog.meta: {e}"))?;
+    opdata
+        .set_len(ctl.opdata_len.load(Relaxed))
+        .map_err(|e| format!("truncate oplog.data: {e}"))?;
     // Each machine's disks: their parts of the shared operation log (`machine/NAME/boot-K/`, K the
     // boot a disk began with).
     if !c.machines.is_empty() {

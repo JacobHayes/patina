@@ -51,7 +51,7 @@ struct TimerFd {
 
 #[derive(Default)]
 pub struct Io {
-    waiters: BTreeSet<usize>,
+    waiters: Vec<usize>,
     info: BTreeMap<usize, ParkInfo>,
     /// Keyed by a number handed out in creation order (every eventfd has the same inode, so
     /// the file names no timer); the runtimes of every process and image use the key.
@@ -98,7 +98,9 @@ impl Io {
             return Some(-4); // EINTR
         };
         sched.park(idx, Wait::Io { gen: cur }, deadline, ok);
-        self.waiters.insert(idx);
+        if let Err(pos) = self.waiters.binary_search(&idx) {
+            self.waiters.insert(pos, idx);
+        }
         self.info.insert(
             idx,
             ParkInfo {
@@ -116,22 +118,28 @@ impl Io {
         let g = ctl.io.gen.load(Relaxed);
         if g != sched.io_generation {
             sched.io_generation = g;
-            for s in std::mem::take(&mut self.waiters) {
-                match sched.entries[s].state {
-                    State::Parked {
-                        wait: Wait::Io { gen },
-                        ..
-                    } if gen < g => {
-                        sched.make_runnable(s, WakeReason::Recheck);
+            if !self.waiters.is_empty() {
+                let mut write = 0;
+                for i in 0..self.waiters.len() {
+                    let s = self.waiters[i];
+                    match sched.entries[s].state {
+                        State::Parked {
+                            wait: Wait::Io { gen },
+                            ..
+                        } if gen < g => {
+                            sched.make_runnable(s, WakeReason::Recheck);
+                        }
+                        State::Parked {
+                            wait: Wait::Io { .. },
+                            ..
+                        } => {
+                            self.waiters[write] = s;
+                            write += 1;
+                        }
+                        _ => {}
                     }
-                    State::Parked {
-                        wait: Wait::Io { .. },
-                        ..
-                    } => {
-                        self.waiters.insert(s);
-                    }
-                    _ => {}
                 }
+                self.waiters.truncate(write);
             }
         }
         self.refresh(sched, ctl);
@@ -140,6 +148,16 @@ impl Io {
     /// Forget waiters that are no longer parked on I/O (deadline, signal, exit) and
     /// publish the count the runtime looks at.
     pub fn refresh(&mut self, sched: &Sched, ctl: &Ctl) {
+        if self.waiters.is_empty() {
+            if !self.info.is_empty() {
+                self.info.clear();
+            }
+            if ctl.io.waiters.load(Relaxed) != 0 {
+                ctl.io.waiters.store(0, Relaxed);
+            }
+            return;
+        }
+        let before = self.waiters.len();
         self.waiters.retain(|&s| {
             matches!(
                 sched.entries[s].state,
@@ -149,9 +167,14 @@ impl Io {
                 }
             )
         });
-        let w = &self.waiters;
-        self.info.retain(|s, _| w.contains(s));
-        ctl.io.waiters.store(self.waiters.len() as u64, Relaxed);
+        if self.waiters.len() != before || self.info.len() != self.waiters.len() {
+            let w = &self.waiters;
+            self.info.retain(|s, _| w.binary_search(s).is_ok());
+        }
+        let n = self.waiters.len() as u64;
+        if ctl.io.waiters.load(Relaxed) != n {
+            ctl.io.waiters.store(n, Relaxed);
+        }
     }
 
     pub fn describe(&self, slot: usize) -> String {

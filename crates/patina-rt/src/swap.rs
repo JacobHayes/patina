@@ -198,8 +198,7 @@ fn decide(nr: u64, a0: u64, checked: &[u8], root: &[u8], chk: Seen) -> Option<Sw
     let slash = c.iter().rposition(|&b| b == b'/')?;
     let mut parent = PathBuf::new();
     let pdir = if slash == 0 { &b"/"[..] } else { &c[..slash] };
-    parent.b[..pdir.len()].copy_from_slice(pdir);
-    parent.n = pdir.len();
+    parent.set(pdir);
     let name = Name::of(&c[slash + 1..])?;
     let (m, t, back) = choose(crate::inject::d(SUB_SWAP_HOW));
     // An exec that succeeds does not come back to be put back after.
@@ -336,8 +335,7 @@ fn swap(
         sibling: Name::new(),
         ino: 0,
     };
-    s.parent.b[..parent.n].copy_from_slice(parent.as_bytes());
-    s.parent.n = parent.n;
+    s.parent.set(parent.as_bytes());
     let full = |n: &[u8]| {
         let mut p = PathBuf::new();
         let base = if parent.as_bytes() == b"/" {
@@ -346,10 +344,10 @@ fn swap(
             parent.as_bytes()
         };
         if base.len() + 1 + n.len() < PATH_MAX {
-            p.b[..base.len()].copy_from_slice(base);
-            p.b[base.len()] = b'/';
-            p.b[base.len() + 1..base.len() + 1 + n.len()].copy_from_slice(n);
-            p.n = base.len() + 1 + n.len();
+            p.push(base);
+            p.push_byte(b'/');
+            p.push(n);
+            p.terminate();
         }
         p
     };
@@ -401,14 +399,13 @@ fn swap(
                     }
                     _ => OUTSIDE_FILE,
                 };
-                target.b[..tb.len()].copy_from_slice(tb);
-                target.n = tb.len();
+                target.set(tb);
                 if st.is_some() && !rename_in(pfd, &name, &aside) {
                     continue;
                 }
                 let r = mutate_as_guest(
                     nr::SYMLINKAT,
-                    [target.b.as_ptr() as u64, pfd as u64, name.ptr(), 0, 0, 0],
+                    [target.as_ptr() as u64, pfd as u64, name.ptr(), 0, 0, 0],
                 );
                 if r != 0 {
                     if st.is_some() && !rename_in(pfd, &aside, &name) {

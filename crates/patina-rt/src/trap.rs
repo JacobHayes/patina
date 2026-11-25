@@ -24,6 +24,8 @@ pub trait Call {
     /// paths, and what `log_paths` records (`resolve::prepare`).
     fn paths(&mut self) -> &mut Paths;
     fn paths_ref(&self) -> &Paths;
+    /// Precomputed `proto::table::nargs::live(nr, &guest_args)`.
+    fn live_mask(&self) -> u8;
 }
 
 #[allow(dead_code)]
@@ -41,24 +43,23 @@ pub struct TrapCall<'a> {
     pub nr: u64,
     pub args: [u64; 6],
     guest: [u64; 6],
-    paths: &'a mut Paths,
+    live_mask: u8,
 }
 
 impl<'a> TrapCall<'a> {
-    pub fn new(
-        frame: &'a mut Frame,
-        ts: &'a mut ThreadState,
-        paths: &'a mut Paths,
-    ) -> TrapCall<'a> {
+    #[inline]
+    pub fn new(frame: &'a mut Frame, ts: &'a mut ThreadState) -> TrapCall<'a> {
         let args = frame.args();
         let nr = frame.nr();
+        let live_mask = proto::table::nargs::live(nr, &args);
+        ts.paths.logged = [Paths::NONE; 2];
         TrapCall {
             frame,
             ts,
             nr,
             args,
             guest: args,
-            paths,
+            live_mask,
         }
     }
 }
@@ -83,10 +84,13 @@ impl Call for TrapCall<'_> {
         self.guest
     }
     fn paths(&mut self) -> &mut Paths {
-        self.paths
+        &mut self.ts.paths
     }
     fn paths_ref(&self) -> &Paths {
-        self.paths
+        &self.ts.paths
+    }
+    fn live_mask(&self) -> u8 {
+        self.live_mask
     }
 }
 

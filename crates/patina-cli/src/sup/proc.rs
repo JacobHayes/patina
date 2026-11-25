@@ -418,6 +418,9 @@ impl Sup {
             self.slot(s).state.store(SLOT_FREE, SeqCst);
         }
         if let Some(sp) = self.sig.procs.remove(&pid) {
+            if sp.pending.set != 0 {
+                self.sig.proc_pending_count -= 1;
+            }
             if let Some((id, _)) = sp.timer {
                 self.sched.cancel(id);
             }

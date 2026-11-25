@@ -3,7 +3,7 @@
 use crate::raw::*;
 use crate::state::{ctl, thread};
 use core::sync::atomic::Ordering::*;
-use proto::ctl::{Op, Reply, Request};
+use proto::ctl::{futex_bloom_mask, Op, Reply, Request, FAST_BASE, FAST_SOLO, YIELD_OTHER};
 
 unsafe fn post(op: Op, args: [u64; 6]) -> *mut proto::Slot {
     let ts = thread();
@@ -17,17 +17,136 @@ unsafe fn post(op: Op, args: [u64; 6]) -> *mut proto::Slot {
             args,
         },
     );
-    (*slot).go.store(0, SeqCst);
-    c.pending_slot.store(ts.slot, SeqCst);
-    c.sup_word.store(1, SeqCst);
+    (*slot).go.store(0, Relaxed);
+    c.pending_slot.store(ts.slot, Relaxed);
+    c.sup_word.store(1, Release);
     futex_wake(&c.sup_word as *const _ as *const u32, 1);
     slot
 }
 
+/// In-process fast path for self-picking `Op::Yield` (solo or multi-thread when the seeded pick
+/// selects the current thread) and zero-waiter `Op::FutexWake` (verified via `Ctl::futex_bloom`).
+/// Produces the exact same `RecKind::SupDecision` record, counters, and `SchedView` as the
+/// supervisor without waking or context-switching to it.
+#[inline]
+fn try_fast_sup(op: Op, args: [u64; 6]) -> Option<Reply> {
+    let c = ctl();
+    let fast = c.sup_fast.load(Relaxed);
+    if fast & FAST_BASE == 0 || c.config.debug != 0 {
+        return None;
+    }
+    let seq = c.seq.load(Relaxed) + 1;
+    match op {
+        Op::Yield => {
+            if fast & FAST_SOLO != 0 {
+                // Only eligible runnable thread: both Pick and PickOther choose `idx`.
+            } else if args[0] != YIELD_OTHER {
+                let eligible = c.view.runnable.load(Relaxed);
+                let pos = c.runnable_pos.load(Relaxed);
+                if eligible <= 1 || pos >= eligible {
+                    return None;
+                }
+                if proto::draw(c.config.seed, proto::Stream::Sched, seq) % eligible != pos {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+        }
+        Op::FutexWake => {
+            let b = c.futex_bloom.load(Relaxed);
+            if b != 0 {
+                let m0 = futex_bloom_mask(args[0]);
+                if b & m0 == m0 {
+                    return None;
+                }
+                if args[3] != 0 {
+                    let m3 = futex_bloom_mask(args[3]);
+                    if b & m3 == m3 {
+                        return None;
+                    }
+                }
+            }
+        }
+        _ => return None,
+    }
+    let now = c.vclock_ns.load(Relaxed);
+    if now > proto::layout::VCLOCK_BOOT_NS + c.config.vtime_limit_ns
+        || now >= c.next_deadline_ns.load(Relaxed)
+    {
+        return None;
+    }
+    if c.io.waiters.load(Relaxed) != 0 && c.io.gen.load(Relaxed) != c.io_synced_gen.load(Relaxed) {
+        return None;
+    }
+    let base = crate::state::ctl_base();
+    let shadows_reclaim = unsafe {
+        (*(base.add(proto::oplog::DUR_OFFSET) as *const proto::oplog::Dur))
+            .shadows
+            .reclaim
+    };
+    if shadows_reclaim != 0 {
+        return None;
+    }
+    let wt = unsafe { proto::wire::WireTab::at(base) };
+    if wt.dirty_n != 0 || wt.scan_all != 0 {
+        return None;
+    }
+    if crate::log::over_limit() {
+        return None;
+    }
+    if (seq & 1023) == 0 {
+        outside_check();
+    }
+    c.seq.store(seq, Relaxed);
+    let s = &c.stats.decisions;
+    s.store(s.load(Relaxed) + 1, Relaxed);
+    let idx = thread().slot as usize;
+    let rec = proto::rec::Rec {
+        seq,
+        vclock_ns: now,
+        slot: idx as u16,
+        kind: proto::RecKind::SupDecision as u8,
+        class: 0,
+        nr: op as u32,
+        args,
+        ret: idx as i64,
+        out_hash: 0,
+        in_hash: 0,
+    };
+    crate::log::append(&rec);
+    c.view.seq.store(seq, Relaxed);
+    Some(Reply { ret: 0, flags: 0 })
+}
+
 /// Give the turn to the supervisor with a request; return when it gives the turn back.
-/// Every request (in particular every park) first checks for real signals from outside.
+/// Every blocking/lifecycle request (and periodically for hot non-blocking ops) checks for
+/// real signals from outside.
 pub fn call_sup(op: Op, args: [u64; 6]) -> Reply {
-    outside_check();
+    if let Some(rep) = try_fast_sup(op, args) {
+        return rep;
+    }
+    let check = crate::state::config().debug != 0
+        || (ctl().seq.load(Relaxed) & 63) == 0
+        || matches!(
+            op,
+            Op::Hello
+                | Op::Sleep
+                | Op::FutexWait
+                | Op::Park
+                | Op::WaitPark
+                | Op::SigWait
+                | Op::SigSuspend
+                | Op::VforkStart
+                | Op::ProcExit
+                | Op::ThreadExit
+                | Op::Exec
+                | Op::Forked
+                | Op::Machine
+        );
+    if check {
+        outside_check();
+    }
     call_sup_raw(op, args)
 }
 

@@ -1,21 +1,35 @@
-//! The guest copy: a byte loop whose load and store the fault entry recognises by address and
-//! turns into a return of `-EFAULT` (`crate::guest` has the rules).
+//! The guest copy: a 16-byte / 8-byte / 1-byte loop whose loads and stores the fault entry
+//! recognises by address range and turns into a return of `-EFAULT` (`crate::guest` has the rules).
 
 core::arch::global_asm!(
     ".pushsection .text.patina_guest_copy,\"ax\",@progbits",
     ".globl patina_guest_copy",
     "patina_guest_copy:",
-    "  cbz x2, 2f",
+    "  cmp x2, #16",
+    "  b.lo 2f",
+    ".globl patina_guest_copy_fault_start",
+    "patina_guest_copy_fault_start:",
     "1:",
-    ".globl patina_guest_copy_ld",
-    "patina_guest_copy_ld:",
+    "  ldp x3, x4, [x1], #16",
+    "  stp x3, x4, [x0], #16",
+    "  sub x2, x2, #16",
+    "  cmp x2, #16",
+    "  b.hs 1b",
+    "2:",
+    "  tbz x2, #3, 3f",
+    "  ldr x3, [x1], #8",
+    "  str x3, [x0], #8",
+    "  sub x2, x2, #8",
+    "3:",
+    "  cbz x2, 5f",
+    "4:",
     "  ldrb w3, [x1], #1",
-    ".globl patina_guest_copy_st",
-    "patina_guest_copy_st:",
     "  strb w3, [x0], #1",
     "  subs x2, x2, #1",
-    "  b.ne 1b",
-    "2:",
+    "  b.ne 4b",
+    ".globl patina_guest_copy_fault_end",
+    "patina_guest_copy_fault_end:",
+    "5:",
     "  mov x0, xzr",
     "  ret",
     ".globl patina_guest_copy_fixup",
@@ -27,8 +41,8 @@ core::arch::global_asm!(
 
 extern "C" {
     fn patina_guest_copy(dst: *mut u8, src: *const u8, n: usize) -> i64;
-    fn patina_guest_copy_ld();
-    fn patina_guest_copy_st();
+    fn patina_guest_copy_fault_start();
+    fn patina_guest_copy_fault_end();
     fn patina_guest_copy_fixup();
 }
 
@@ -41,9 +55,11 @@ pub unsafe fn guest_copy(dst: *mut u8, src: *const u8, n: usize) -> i64 {
 /// Called by the fault handler for a fault at `pc` in runtime text: where to resume, if the
 /// fault was a guest copy's.
 pub fn fixup(pc: u64) -> Option<u64> {
-    let ld = patina_guest_copy_ld as *const () as u64;
-    let st = patina_guest_copy_st as *const () as u64;
-    (pc == ld || pc == st).then_some(patina_guest_copy_fixup as *const () as u64)
+    let start = patina_guest_copy_fault_start as *const () as u64;
+    let end = patina_guest_copy_fault_end as *const () as u64;
+    (start..end)
+        .contains(&pc)
+        .then_some(patina_guest_copy_fixup as *const () as u64)
 }
 
 /// The stack pointer of the caller.

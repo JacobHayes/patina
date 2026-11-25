@@ -263,6 +263,10 @@ pub struct Wire {
     last_gen: u64,
     queued: u64,
     buf: Vec<u8>,
+    pub(super) has_retry: bool,
+    scratch_marked: Vec<usize>,
+    scratch_sides: Vec<(u32, bool)>,
+    scratch_closed: Vec<usize>,
 }
 
 fn tab(ctl: &Ctl) -> &'static mut WireTab {
@@ -931,6 +935,13 @@ impl Sup {
     pub fn wire_step(&mut self) {
         let t = tab(self.ctl);
         let gen = self.ctl.io.gen.load(Relaxed);
+        if t.dirty_n == 0
+            && t.scan_all == 0
+            && gen == self.wire.last_gen
+            && self.sched.fired_wire.is_empty()
+        {
+            return;
+        }
         if self.wire.conns.is_empty()
             && t.dirty_n == 0
             && t.scan_all == 0
@@ -943,112 +954,132 @@ impl Sup {
         // 1. Marks left by the runtime.
         let all = t.scan_all != 0;
         let n = (t.dirty_n as usize).min(DIRTY_CAP);
-        let mut marked: Vec<usize> = t.dirty[..n].iter().map(|&x| x as usize).collect();
-        for &i in &marked {
-            if i < VINO_CAP {
-                t.socks[i].flags &= !WF_SENT;
-            }
-        }
-        t.dirty_n = 0;
-        t.scan_all = 0;
-        let mut sides: BTreeSet<(u32, bool)> = BTreeSet::new();
-        let mut closed: Vec<usize> = vec![];
-        if all {
-            for (&id, c) in &self.wire.conns {
-                sides.insert((id, false));
-                if c.established {
-                    sides.insert((id, true));
+        if all || n > 0 {
+            let mut marked = std::mem::take(&mut self.wire.scratch_marked);
+            marked.clear();
+            marked.extend(t.dirty[..n].iter().map(|&x| x as usize));
+            for &i in &marked {
+                if i < VINO_CAP {
+                    t.socks[i].flags &= !WF_SENT;
                 }
             }
-            for s in t.socks.iter_mut().filter(|s| s.flags & WF_SENT != 0) {
-                s.flags &= !WF_SENT;
-            }
-        } else {
-            marked.sort_unstable();
-            marked.dedup();
-            for i in marked {
-                if i < VINO_CAP && t.socks[i].flags & WF_DGRAM != 0 {
-                    closed.push(i);
-                    continue;
+            t.dirty_n = 0;
+            t.scan_all = 0;
+            let mut sides = std::mem::take(&mut self.wire.scratch_sides);
+            sides.clear();
+            let mut closed = std::mem::take(&mut self.wire.scratch_closed);
+            closed.clear();
+            if all {
+                for (&id, c) in &self.wire.conns {
+                    sides.push((id, false));
+                    if c.established {
+                        sides.push((id, true));
+                    }
                 }
-                if let Some(&(id, server)) = self.wire.by_idx.get(&i) {
-                    sides.insert((id, server));
+                for s in t.socks.iter_mut().filter(|s| s.flags & WF_SENT != 0) {
+                    s.flags &= !WF_SENT;
                 }
-                // A listener closed: its connections not yet accepted lose their embryo.
-                if self.wire.socks.get(&i).is_some_and(|s| s.listening) {
-                    for (&id, c) in &self.wire.conns {
-                        if c.listener == Some(i) && c.established && c.server.idx.is_none() {
-                            sides.insert((id, true));
+            } else {
+                marked.sort_unstable();
+                marked.dedup();
+                for &i in &marked {
+                    if i < VINO_CAP && t.socks[i].flags & WF_DGRAM != 0 {
+                        closed.push(i);
+                        continue;
+                    }
+                    if let Some(&(id, server)) = self.wire.by_idx.get(&i) {
+                        sides.push((id, server));
+                    }
+                    // A listener closed: its connections not yet accepted lose their embryo.
+                    if self.wire.socks.get(&i).is_some_and(|s| s.listening) {
+                        for (&id, c) in &self.wire.conns {
+                            if c.listener == Some(i) && c.established && c.server.idx.is_none() {
+                                sides.push((id, true));
+                            }
                         }
                     }
                 }
+                sides.sort_unstable();
+                sides.dedup();
             }
-        }
-        for (id, server) in sides {
-            self.read_side(id, server);
-            // A keepalive option may have changed (`setsockopt` marks the socket).
-            self.ka_arm(id, server);
-        }
-        // Datagram sockets whose last descriptor may have closed.
-        if all {
-            self.udp_sweep(None);
-        } else if !closed.is_empty() {
-            self.udp_sweep(Some(&closed));
+            for &(id, server) in &sides {
+                self.read_side(id, server);
+                // A keepalive option may have changed (`setsockopt` marks the socket).
+                self.ka_arm(id, server);
+            }
+            // Datagram sockets whose last descriptor may have closed.
+            if all {
+                self.udp_sweep(None);
+            } else if !closed.is_empty() {
+                self.udp_sweep(Some(&closed));
+            }
+            self.wire.scratch_marked = marked;
+            self.wire.scratch_sides = sides;
+            self.wire.scratch_closed = closed;
         }
         // 2. The generation moved: receivers may have room, a backlog may have space.
         if gen != self.wire.last_gen || all {
-            let blocked: Vec<(u32, usize)> =
-                std::mem::take(&mut self.wire.blocked).into_iter().collect();
-            for (id, dir) in blocked {
-                self.deliver(id, dir);
+            if !self.wire.blocked.is_empty() {
+                let blocked: Vec<(u32, usize)> =
+                    std::mem::take(&mut self.wire.blocked).into_iter().collect();
+                for (id, dir) in blocked {
+                    self.deliver(id, dir);
+                }
             }
-            let retry: Vec<u32> = self
-                .wire
-                .conns
-                .iter()
-                .filter(|(_, c)| c.retry)
-                .map(|(&k, _)| k)
-                .collect();
-            for id in retry {
-                self.establish(id);
+            if self.wire.has_retry {
+                self.wire.has_retry = false;
+                let retry: Vec<u32> = self
+                    .wire
+                    .conns
+                    .iter()
+                    .filter(|(_, c)| c.retry)
+                    .map(|(&k, _)| k)
+                    .collect();
+                for id in retry {
+                    self.establish(id);
+                }
             }
-            let held: Vec<usize> = self.udp.blocked.iter().copied().collect();
-            for j in held {
-                self.udp_flush(j);
+            if !self.udp.blocked.is_empty() {
+                let held: Vec<usize> = self.udp.blocked.iter().copied().collect();
+                for j in held {
+                    self.udp_flush(j);
+                }
             }
         }
         // 3. Events.
-        for k in std::mem::take(&mut self.sched.fired_wire) {
-            let id = (k >> 2) as u32;
-            if k & 3 == EV_CONNECT && k & EV_KA != 0 {
-                self.ka_fire(id, k & EV_KA << 1 != 0);
-                continue;
-            }
-            match k & 3 {
-                super::udp::EV_UDP => self.udp_fire(k >> 2),
-                EV_DIR0 | EV_DIR1 => {
-                    let dir = (k & 3) as usize;
-                    if let Some(c) = self.wire.conns.get_mut(&id) {
-                        c.dirs[dir].ev = None;
-                        self.deliver(id, dir);
-                    }
+        if !self.sched.fired_wire.is_empty() {
+            for k in std::mem::take(&mut self.sched.fired_wire) {
+                let id = (k >> 2) as u32;
+                if k & 3 == EV_CONNECT && k & EV_KA != 0 {
+                    self.ka_fire(id, k & EV_KA << 1 != 0);
+                    continue;
                 }
-                _ => {
-                    if let Some(c) = self.wire.conns.get_mut(&id) {
-                        if c.established {
-                            c.give_up_ev = None;
-                            self.give_up(id);
-                            continue;
+                match k & 3 {
+                    super::udp::EV_UDP => self.udp_fire(k >> 2),
+                    EV_DIR0 | EV_DIR1 => {
+                        let dir = (k & 3) as usize;
+                        if let Some(c) = self.wire.conns.get_mut(&id) {
+                            c.dirs[dir].ev = None;
+                            self.deliver(id, dir);
                         }
-                        c.fate_ev = None;
-                        if c.syn_n > 0 && self.syn_retry(id) {
-                            continue;
-                        }
-                        let c = &self.wire.conns[&id];
-                        match c.fate {
-                            Fate::Establish => self.establish(id),
-                            Fate::Refuse { .. } => self.connect_failed(id, ECONNREFUSED),
-                            Fate::Timeout => self.connect_failed(id, ETIMEDOUT),
+                    }
+                    _ => {
+                        if let Some(c) = self.wire.conns.get_mut(&id) {
+                            if c.established {
+                                c.give_up_ev = None;
+                                self.give_up(id);
+                                continue;
+                            }
+                            c.fate_ev = None;
+                            if c.syn_n > 0 && self.syn_retry(id) {
+                                continue;
+                            }
+                            let c = &self.wire.conns[&id];
+                            match c.fate {
+                                Fate::Establish => self.establish(id),
+                                Fate::Refuse { .. } => self.connect_failed(id, ECONNREFUSED),
+                                Fate::Timeout => self.connect_failed(id, ETIMEDOUT),
+                            }
                         }
                     }
                 }
@@ -1087,6 +1118,7 @@ impl Sup {
         let e = errno();
         if r != 0 && e == libc::EAGAIN {
             self.wire.conns.get_mut(&id).unwrap().retry = true;
+            self.wire.has_retry = true;
             return;
         }
         if r != 0 {

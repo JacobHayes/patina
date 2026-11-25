@@ -130,15 +130,19 @@ pub fn cell_lost(errno: i64, mapping: bool) -> ! {
 }
 
 fn read_cell() -> i64 {
-    match crate::guest::get::<i64>(cell()) {
-        Ok(v) => v,
-        Err(e) => cell_lost(e, false),
+    let mut v = 0i64;
+    if unsafe { crate::arch::guest_copy(&mut v as *mut i64 as *mut u8, cell() as *const u8, 8) }
+        != 0
+    {
+        cell_lost(-crate::raw::e::EFAULT, false);
     }
+    v
 }
 
 fn write_cell(v: i64) {
-    if let Err(e) = crate::guest::put(cell(), v) {
-        cell_lost(e, false)
+    if unsafe { crate::arch::guest_copy(cell() as *mut u8, &v as *const i64 as *const u8, 8) } != 0
+    {
+        cell_lost(-crate::raw::e::EFAULT, false);
     }
 }
 
@@ -151,7 +155,6 @@ pub fn enter(ts: &mut ThreadState) {
     enter_slow(ts);
 }
 
-#[inline(never)]
 fn enter_slow(ts: &mut ThreadState) {
     let t0 = crate::profile::now_ns();
     let p = &mut proc().compute;
@@ -191,7 +194,6 @@ pub fn exit(ts: &mut ThreadState) {
 /// this reads is the supervisor's (`view`, `seq`, the deadline) and the run's seed; a program
 /// that wrote there would change only when its own points come, as for its cell. A process
 /// whose rebuilt code has said hello does not read the view: one gap at a time.
-#[inline(never)]
 fn exit_slow(ts: &mut ThreadState) {
     let t0 = crate::profile::now_ns();
     ts.compute_segs += 1;

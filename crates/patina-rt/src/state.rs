@@ -138,6 +138,8 @@ pub struct ThreadState {
     /// by `guest::still_clear` after a park: other threads ran meanwhile.
     pub call_row: u64,
     pub call_args: [u64; 6],
+    /// Per-trap resolved path buffers (kept in `ThreadState` instead of an 8 KiB stack frame).
+    pub paths: crate::resolve::Paths,
 }
 
 impl ThreadState {
@@ -169,6 +171,7 @@ impl ThreadState {
             compute_segs: 0,
             call_row: 0,
             call_args: [0; 6],
+            paths: crate::resolve::Paths::new(),
         }
     }
     /// This thread's CPU time, the thread and process CPU clocks: its traps at the trap charge
@@ -217,6 +220,53 @@ pub fn thread() -> &'static mut ThreadState {
 
 pub const MAX_MOUNTS: usize = 64;
 pub const URANDOM_WORDS: usize = (FD_HIDDEN_MIN as usize).div_ceil(64);
+/// Per-descriptor cached metadata (immutable file identity + generation-validated flags/nlink).
+pub const FD_META_CAP: usize = 1024;
+pub const META_STAT: u8 = 1 << 0;
+pub const META_WORK: u8 = 1 << 1;
+pub const META_REG: u8 = 1 << 2;
+pub const META_DIR: u8 = 1 << 3;
+pub const META_HAS_VKEY: u8 = 1 << 4;
+pub const META_NLINK_POS: u8 = 1 << 5;
+pub const META_HAS_FL: u8 = 1 << 6;
+pub const WIRE_UNKNOWN: u16 = u16::MAX;
+pub const WIRE_NONE: u16 = u16::MAX - 1;
+
+#[derive(Clone, Copy)]
+pub struct FdMeta {
+    /// Cached `sys::io::Kind`: `0 = unknown, 1 = Plain, 2 = Pipe, 3 = Sock, 4 = Anon`.
+    pub kind: u8,
+    /// `META_*` bits.
+    pub flags: u8,
+    /// `(st.mode() >> 12) as u16`: file type bits (`S_IFMT >> 12`).
+    pub mode_fmt: u16,
+    /// Cached wire socket index (`WIRE_UNKNOWN`, `WIRE_NONE`, or `0..VINO_CAP`).
+    pub wire_idx: u16,
+    pub _pad: u16,
+    /// Cached `fcntl(F_GETFL)` result (valid when `META_HAS_FL` and `fl_gen == ctl().fl_gen`).
+    pub fl: i32,
+    pub fl_gen: u64,
+    pub unlink_gen: u64,
+    pub dev: u64,
+    pub ino: u64,
+    pub vkey: u64,
+}
+
+impl FdMeta {
+    pub const EMPTY: FdMeta = FdMeta {
+        kind: 0,
+        flags: 0,
+        mode_fmt: 0,
+        wire_idx: WIRE_UNKNOWN,
+        _pad: 0,
+        fl: 0,
+        fl_gen: 0,
+        unlink_gen: 0,
+        dev: 0,
+        ino: 0,
+        vkey: 0,
+    };
+}
 
 /// Runtime per-process (per image) state.
 pub struct Proc {
@@ -226,10 +276,14 @@ pub struct Proc {
     pub mmap_cursor: u64,
     pub priv_cursor: u64,
     pub log_mapped: u64,
+    pub oplog_mapped: u64,
+    pub opdata_mapped: u64,
     /// Virtual dispositions: handler, flags, restorer, mask (kernel `struct sigaction` layout).
     pub sigact: [[u64; 4]; 65],
     /// Descriptors open on /dev/urandom or /dev/random: reads are entropy draws.
     pub urandom: [u64; URANDOM_WORDS],
+    /// Cached per-descriptor metadata (invalidated on close/dup/exec; flags & nlink validated by gen).
+    pub fd_meta: [FdMeta; FD_META_CAP],
     /// Mounts in mountinfo order: (mount id, st_dev encoding).
     pub mounts: [(u64, u64); MAX_MOUNTS],
     pub nmounts: usize,
@@ -272,8 +326,11 @@ static PROC: Global<Proc> = Global(UnsafeCell::new(Proc {
     mmap_cursor: MMAP_TOP,
     priv_cursor: RT_PRIV,
     log_mapped: 0,
+    oplog_mapped: 0,
+    opdata_mapped: 0,
     sigact: [[0; 4]; 65],
     urandom: [0; URANDOM_WORDS],
+    fd_meta: [FdMeta::EMPTY; FD_META_CAP],
     mounts: [(0, 0); MAX_MOUNTS],
     nmounts: 0,
     asid: 0,
@@ -395,6 +452,144 @@ impl Proc {
             }
         }
     }
+    #[inline]
+    pub fn get_fd_meta(&self, fd: i64) -> Option<FdMeta> {
+        if in_vfork_child() || !(0..FD_META_CAP as i64).contains(&fd) {
+            return None;
+        }
+        Some(self.fd_meta[fd as usize])
+    }
+    #[inline]
+    pub fn get_fd_kind(&self, fd: i64) -> u8 {
+        if in_vfork_child() || !(0..FD_META_CAP as i64).contains(&fd) {
+            return 0;
+        }
+        self.fd_meta[fd as usize].kind
+    }
+    #[inline]
+    pub fn clear_fd_meta(&mut self, fd: i64) {
+        if in_vfork_child() || !(0..FD_META_CAP as i64).contains(&fd) {
+            return;
+        }
+        self.fd_meta[fd as usize] = FdMeta::EMPTY;
+    }
+    #[inline]
+    pub fn copy_fd_meta(&mut self, src: i64, dst: i64) {
+        if in_vfork_child() {
+            return;
+        }
+        let m = if (0..FD_META_CAP as i64).contains(&src) {
+            self.fd_meta[src as usize]
+        } else {
+            FdMeta::EMPTY
+        };
+        if (0..FD_META_CAP as i64).contains(&dst) {
+            self.fd_meta[dst as usize] = m;
+        }
+    }
+    #[inline]
+    pub fn cache_fd_stat(
+        &mut self,
+        fd: i64,
+        st: &crate::sys::fs::St,
+        work: bool,
+        vk: Option<u64>,
+    ) -> FdMeta {
+        let fmt = st.mode() & 0o170000;
+        let kind = match fmt {
+            0o010000 => 2,
+            0o140000 => 3,
+            0 => 4,
+            _ => 1,
+        };
+        let mut flags = META_STAT;
+        if work {
+            flags |= META_WORK;
+        }
+        if fmt == 0o100000 {
+            flags |= META_REG;
+        } else if fmt == 0o040000 {
+            flags |= META_DIR;
+        }
+        let vkey = match vk {
+            Some(k) => {
+                flags |= META_HAS_VKEY;
+                k
+            }
+            None => 0,
+        };
+        let unlink_gen = if st.nlink() > 0 {
+            flags |= META_NLINK_POS;
+            ctl().unlink_gen.load(Relaxed)
+        } else {
+            0
+        };
+        let mut m = if !in_vfork_child() && (0..FD_META_CAP as i64).contains(&fd) {
+            self.fd_meta[fd as usize]
+        } else {
+            FdMeta::EMPTY
+        };
+        m.kind = kind;
+        m.flags = (m.flags & META_HAS_FL) | flags;
+        m.mode_fmt = (st.mode() >> 12) as u16;
+        if kind != 3 {
+            m.wire_idx = WIRE_NONE;
+        }
+        m.unlink_gen = unlink_gen;
+        m.dev = st.dev();
+        m.ino = st.ino();
+        m.vkey = vkey;
+        if !in_vfork_child() && (0..FD_META_CAP as i64).contains(&fd) {
+            self.fd_meta[fd as usize] = m;
+        }
+        m
+    }
+    #[inline]
+    pub fn set_fd_wire(&mut self, fd: i64, wire_idx: u16) {
+        if in_vfork_child() || !(0..FD_META_CAP as i64).contains(&fd) {
+            return;
+        }
+        self.fd_meta[fd as usize].wire_idx = wire_idx;
+    }
+    #[inline]
+    pub fn mark_fd_nlink_pos(&mut self, fd: i64) {
+        if in_vfork_child() || !(0..FD_META_CAP as i64).contains(&fd) {
+            return;
+        }
+        let m = &mut self.fd_meta[fd as usize];
+        m.flags |= META_NLINK_POS;
+        m.unlink_gen = ctl().unlink_gen.load(Relaxed);
+    }
+    #[inline]
+    pub fn get_fd_fl(&mut self, fd: i64) -> i64 {
+        let gen = ctl().fl_gen.load(Relaxed);
+        if !in_vfork_child() && (0..FD_META_CAP as i64).contains(&fd) {
+            let m = &self.fd_meta[fd as usize];
+            if m.flags & META_HAS_FL != 0 && m.fl_gen == gen {
+                return m.fl as i64;
+            }
+        }
+        let fl = unsafe { crate::raw::sc2(crate::raw::nr::FCNTL, fd as u64, 3) };
+        if fl >= 0 && !in_vfork_child() && (0..FD_META_CAP as i64).contains(&fd) {
+            let m = &mut self.fd_meta[fd as usize];
+            m.fl = fl as i32;
+            m.fl_gen = gen;
+            m.flags |= META_HAS_FL;
+        }
+        fl
+    }
+}
+
+#[inline]
+pub fn bump_fl_gen() {
+    let g = &ctl().fl_gen;
+    g.store(g.load(Relaxed) + 1, Relaxed);
+}
+
+#[inline]
+pub fn bump_unlink_gen() {
+    let g = &ctl().unlink_gen;
+    g.store(g.load(Relaxed) + 1, Relaxed);
 }
 
 /// Bump allocation in the runtime's private region.

@@ -20,7 +20,6 @@ use proto::ctl::{Op, NO_DEADLINE, PARK_IN, PARK_OPEN, PARK_OUT};
 
 pub const RWF_NOWAIT: u64 = 8;
 pub const O_NONBLOCK: u64 = 0o4000;
-const F_GETFL: u64 = 3;
 const F_SETFL: u64 = 4;
 pub const POLLIN: u16 = 1;
 pub const POLLERR: u16 = 8;
@@ -40,13 +39,24 @@ pub enum Kind {
 }
 
 pub fn kind_of(fd: i64) -> Option<Kind> {
+    let p = crate::state::proc();
+    match p.get_fd_kind(fd) {
+        1 => return Some(Kind::Plain),
+        2 => return Some(Kind::Pipe),
+        3 => return Some(Kind::Sock),
+        4 => return Some(Kind::Anon),
+        _ => {}
+    }
     let st = fstat_raw(fd)?;
-    Some(match st.mode() & 0o170000 {
-        0o010000 => Kind::Pipe,
-        0o140000 => Kind::Sock,
-        0 => Kind::Anon,
-        _ => Kind::Plain,
-    })
+    let work = crate::path::is_work(st.dev());
+    let vk = super::fs::vkey(&st);
+    let m = p.cache_fd_stat(fd, &st, work, vk);
+    match m.kind {
+        2 => Some(Kind::Pipe),
+        3 => Some(Kind::Sock),
+        4 => Some(Kind::Anon),
+        _ => Some(Kind::Plain),
+    }
 }
 
 pub fn can_block(k: Option<Kind>) -> bool {
@@ -67,8 +77,14 @@ pub fn bump() {
 }
 
 /// Should this thread yield at the end of its call so that I/O waiters re-attempt?
+#[inline]
 pub fn take_notify() -> bool {
-    NOTIFY.swap(false, Relaxed)
+    if NOTIFY.load(Relaxed) {
+        NOTIFY.store(false, Relaxed);
+        true
+    } else {
+        false
+    }
 }
 
 fn inc(c: &core::sync::atomic::AtomicU64) {
@@ -76,12 +92,12 @@ fn inc(c: &core::sync::atomic::AtomicU64) {
 }
 
 pub fn nonblocking(fd: i64) -> bool {
-    let fl = unsafe { sc2(nr::FCNTL, fd as u64, F_GETFL) };
+    let fl = crate::state::proc().get_fd_fl(fd);
     fl >= 0 && fl as u64 & O_NONBLOCK != 0
 }
 
 pub fn set_nonblock(fd: i64, on: bool) -> i64 {
-    let fl = unsafe { sc2(nr::FCNTL, fd as u64, F_GETFL) };
+    let fl = crate::state::proc().get_fd_fl(fd);
     if fl < 0 {
         return fl;
     }
@@ -90,7 +106,11 @@ pub fn set_nonblock(fd: i64, on: bool) -> i64 {
     } else {
         fl as u64 & !O_NONBLOCK
     };
-    unsafe { sc3(nr::FCNTL, fd as u64, F_SETFL, nfl) }
+    let r = unsafe { sc3(nr::FCNTL, fd as u64, F_SETFL, nfl) };
+    if r >= 0 {
+        crate::state::bump_fl_gen();
+    }
+    r
 }
 
 /// One `pollfd` with a zero timeout: the ready events (0 if none).
@@ -365,19 +385,24 @@ impl IovCursor {
 /// error / would-block / timeout / EINTR if nothing was written.
 pub fn write_all(w: &mut Waiter, iov: u64, cnt: u64, mut f: impl FnMut(u64, u64) -> i64) -> i64 {
     let mut cur = IovCursor::new(iov, cnt);
+    // The first attempt passes the guest's own array, so a write of at most 4096 bytes
+    // to a pipe is one kernel call (atomic) however it is split into segments.
+    let mut total = match w.run(|| eagain(f(iov, cnt))) {
+        Got::Done(r) if r > 0 => {
+            bump();
+            cur.advance(r as u64);
+            if cur.done() {
+                return r;
+            }
+            r
+        }
+        Got::Done(r) => return r,
+        g => return result(g, -e::EAGAIN),
+    };
     let mut win = [[0u64; 2]; WIN];
-    let mut total = 0i64;
-    let mut first = true;
     loop {
-        // The first attempt passes the guest's own array, so a write of at most 4096 bytes
-        // to a pipe is one kernel call (atomic) however it is split into segments.
-        let (p, n) = if first {
-            (iov, cnt)
-        } else {
-            (win.as_ptr() as u64, cur.window(&mut win))
-        };
-        first = false;
-        let g = w.run(|| eagain(f(p, n)));
+        let n = cur.window(&mut win);
+        let g = w.run(|| eagain(f(win.as_ptr() as u64, n)));
         match g {
             Got::Done(r) if r > 0 => {
                 total += r;
@@ -387,14 +412,7 @@ pub fn write_all(w: &mut Waiter, iov: u64, cnt: u64, mut f: impl FnMut(u64, u64)
                     return total;
                 }
             }
-            Got::Done(r) => return if total > 0 { total } else { r },
-            g => {
-                return if total > 0 {
-                    total
-                } else {
-                    result(g, -e::EAGAIN)
-                }
-            }
+            _ => return total,
         }
     }
 }
@@ -406,7 +424,7 @@ pub fn write_all(w: &mut Waiter, iov: u64, cnt: u64, mut f: impl FnMut(u64, u64)
 /// made non-blocking for the duration of the plain readv/writev only. No other guest
 /// thread, in any process, runs meanwhile, so nobody can observe the flag.
 fn toggled(fd: i64, nr: u64, iov: u64, cnt: u64) -> i64 {
-    let fl = unsafe { sc2(nr::FCNTL, fd as u64, F_GETFL) };
+    let fl = crate::state::proc().get_fd_fl(fd);
     if fl < 0 {
         return fl;
     }
@@ -471,6 +489,9 @@ pub fn write_iov(nr: u64, fd: i64, kind: Kind, iov: u64, cnt: u64, flags: u64) -
         w.nonblock = Some(true);
     }
     let r = write_all(&mut w, iov, cnt, |p, n| {
+        if kind == Kind::Anon && flags & !RWF_NOWAIT == 0 {
+            return toggled(fd, nr::WRITEV, p, n);
+        }
         let r = unsafe {
             sc6(
                 nr::PWRITEV2,

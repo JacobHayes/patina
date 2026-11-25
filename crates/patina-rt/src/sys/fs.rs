@@ -513,6 +513,10 @@ fn open(call: &mut dyn Call) -> i64 {
                 proc().set_urandom(r, true);
             }
         }
+        proc().clear_fd_meta(r);
+        let work = path::is_work(s.dev());
+        let vk = vkey(s);
+        proc().cache_fd_stat(r, s, work, vk);
     }
     if let Kind::SelfFd(n) = k {
         if let Some(sk) = super::procfs::kind_of(n) {
@@ -932,7 +936,7 @@ fn readlink(call: &mut dyn Call) -> i64 {
                 sc4(
                     nr::READLINKAT,
                     AT_FDCWD as u64,
-                    norm.b.as_ptr() as u64,
+                    norm.as_ptr() as u64,
                     t.as_mut_ptr() as u64,
                     t.len() as u64,
                 )
@@ -1215,6 +1219,7 @@ fn tracked(nr: u64, a: &[u64; 6], call: impl FnOnce() -> i64) -> i64 {
         }
         // removals
         nr::UNLINK | nr::RMDIR | nr::UNLINKAT => {
+            crate::state::bump_unlink_gen();
             let parent = parent_stat(d0, ps);
             touch(&parent, Which::Modify);
             let t = before[0];
@@ -1252,6 +1257,7 @@ fn tracked(nr: u64, a: &[u64; 6], call: impl FnOnce() -> i64) -> i64 {
         }
         // renames
         nr::RENAME | nr::RENAMEAT | nr::RENAMEAT2 => {
+            crate::state::bump_unlink_gen();
             let (d1, p1) = names[1];
             let ns = unsafe { cs(p1) };
             let op = parent_stat(d0, ps);

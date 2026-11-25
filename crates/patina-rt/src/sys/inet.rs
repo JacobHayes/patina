@@ -84,12 +84,42 @@ pub fn observed(fd: i64) -> Option<[u64; 4]> {
 /// (a wire socket has had one since it was made), so asking about any other descriptor
 /// (a unix socket at each close) leaves the run as it was.
 pub fn wire_idx(fd: i64) -> Option<usize> {
+    let p = crate::state::proc();
+    if let Some(m) = p.get_fd_meta(fd) {
+        if m.wire_idx == crate::state::WIRE_NONE {
+            return None;
+        }
+        if m.wire_idx < crate::state::WIRE_NONE {
+            let i = m.wire_idx as usize;
+            return (i < VINO_CAP && sock(i).family != 0).then_some(i);
+        }
+        if m.flags & crate::state::META_STAT != 0 {
+            if m.kind != 3 {
+                p.set_fd_wire(fd, crate::state::WIRE_NONE);
+                return None;
+            }
+            let v = crate::vino::find(m.dev, m.ino)?;
+            let i = (v - VINO_BASE) as usize;
+            if i < VINO_CAP && sock(i).family != 0 {
+                p.set_fd_wire(fd, i as u16);
+                return Some(i);
+            }
+            return None;
+        }
+    }
     let st = super::fs::fstat_raw(fd)?;
     if st.mode() & 0o170000 != 0o140000 {
+        p.set_fd_wire(fd, crate::state::WIRE_NONE);
         return None;
     }
-    let i = (crate::vino::find(st.dev(), st.ino())? - VINO_BASE) as usize;
-    (i < VINO_CAP && sock(i).family != 0).then_some(i)
+    let v = crate::vino::find(st.dev(), st.ino())?;
+    let i = (v - VINO_BASE) as usize;
+    if i < VINO_CAP && sock(i).family != 0 {
+        p.set_fd_wire(fd, i as u16);
+        Some(i)
+    } else {
+        None
+    }
 }
 
 /// Index of the UDP socket open on `fd`, if it is one (as `wire_idx`, allocating nothing).
@@ -1080,15 +1110,46 @@ fn send_iov(fd: i64, i: usize, nr: u64, iov: u64, cnt: u64, flags: u64) -> i64 {
 
 fn sendto(call: &mut dyn Call, i: usize) -> i64 {
     let a = args(call);
-    let one = [a[1], a[2]];
-    send_iov(
-        a[0] as i32 as i64,
-        i,
-        nr::SENDTO,
-        one.as_ptr() as u64,
-        1,
-        a[3],
-    )
+    let fd = a[0] as i32 as i64;
+    let flags = a[3];
+    if let Some(r) = send_check(fd, i) {
+        return sent(i, r, flags & MSG_NOSIGNAL != 0);
+    }
+    if flags & MSG_OOB != 0 {
+        refuse(b"MSG_OOB");
+        return -e::EOPNOTSUPP;
+    }
+    let mut w = sender(fd, nr::SENDTO, flags);
+    let f = (flags & !MSG_WAITALL) | MSG_DONTWAIT | MSG_NOSIGNAL;
+    let mut total = 0u64;
+    let r = loop {
+        let off = total;
+        let g = w.run(|| {
+            let r = unsafe { sc6(nr::SENDTO, fd as u64, a[1] + off, a[2] - off, f, 0, 0) };
+            if r > 0 {
+                mark(i);
+            }
+            io::eagain(r)
+        });
+        match g {
+            Got::Done(r) if r > 0 => {
+                total += r as u64;
+                io::bump();
+                if total >= a[2] {
+                    break total as i64;
+                }
+            }
+            Got::Done(r) => break if total > 0 { total as i64 } else { r },
+            g => {
+                break if total > 0 {
+                    total as i64
+                } else {
+                    io::result(g, -e::EAGAIN)
+                }
+            }
+        }
+    };
+    w.finish(sent(i, r, flags & MSG_NOSIGNAL != 0))
 }
 
 fn sendmsg(call: &mut dyn Call, i: usize) -> i64 {

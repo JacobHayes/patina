@@ -33,11 +33,14 @@ use proto::layout::FD_HIDDEN_MIN;
 use proto::table::{Class, Group, Row};
 
 pub fn dispatch(call: &mut dyn Call, row: &'static Row) -> Action {
+    let live = call.live_mask();
     // Descriptors the call reads (an anonymous `mmap` ignores its descriptor argument).
-    let fds = row.fds & proto::table::nargs::live(call.nr(), &call.guest_args());
-    for i in 0..6 {
-        if fds & (1 << i) != 0 && call.arg(i) as i32 >= FD_HIDDEN_MIN {
-            return Action::Return(-e::EBADF);
+    if row.fds != 0 {
+        let fds = row.fds & live;
+        for i in 0..6 {
+            if fds & (1 << i) != 0 && call.arg(i) as i32 >= FD_HIDDEN_MIN {
+                return Action::Return(-e::EBADF);
+            }
         }
     }
     match row.class {
@@ -54,7 +57,7 @@ pub fn dispatch(call: &mut dyn Call, row: &'static Row) -> Action {
             // Memory the kernel would touch for the program (`Row::ins`, `outs`, `refs`),
             // checked before anything reads it: the runtime's region reads as a hole.
             let guest = call.guest_args();
-            if crate::guest::names_runtime(row, &guest) {
+            if crate::guest::names_runtime_live(row, &guest, live) {
                 return Action::Return(-e::EFAULT);
             }
             let ts = call.thread();
@@ -80,11 +83,13 @@ pub fn dispatch(call: &mut dyn Call, row: &'static Row) -> Action {
 /// A call the table lets through: its paths, its faults, its handler.
 fn passed(call: &mut dyn Call, row: &'static Row) -> Action {
     // Path arguments resolved first: handlers see the path the kernel walks.
-    if let Err(r) = crate::resolve::prepare(call) {
-        if r == -e::ENOENT {
-            crate::resolve::note_missing(call);
+    if crate::resolve::has_paths(call.nr()) {
+        if let Err(r) = crate::resolve::prepare(call) {
+            if r == -e::ENOENT {
+                crate::resolve::note_missing(call);
+            }
+            return Action::Return(r);
         }
-        return Action::Return(r);
     }
     // Faults are decided before the call.
     let mut post = None;

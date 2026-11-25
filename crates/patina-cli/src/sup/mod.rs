@@ -333,17 +333,45 @@ impl Sup {
             .next_deadline_ns
             .store(self.sched.next_deadline().unwrap_or(u64::MAX), Relaxed);
         let pid = self.sched.entries[to].pid;
-        let quiet = self.sig.procs.get(&pid).is_none_or(|p| p.pending.set == 0);
+        let quiet = self.sig.proc_pending_count == 0
+            || self.sig.procs.get(&pid).is_none_or(|p| p.pending.set == 0);
+        let eligible = self.sched.eligible_count();
         let v = &self.ctl.view;
         v.seq.store(self.ctl.seq.load(Relaxed), Relaxed);
         v.slot.store(to as u64, Relaxed);
-        v.runnable
-            .store(self.sched.eligible().count() as u64, Relaxed);
+        v.runnable.store(eligible as u64, Relaxed);
         v.quiet.store(quiet as u64, Relaxed);
+        let fast_base = self.machine_count() == 0
+            && self.machines.pending.is_empty()
+            && self.sig.waiting.is_empty()
+            && self.sig.proc_pending_count == 0
+            && !self.wire.has_retry
+            && !self.sched.is_frozen(to);
+        let mut fast = if fast_base { FAST_BASE } else { 0 };
+        if fast_base && eligible == 1 {
+            fast |= FAST_SOLO;
+        }
+        let pos = if fast_base {
+            self.sched.eligible_pos(to).map_or(u64::MAX, |i| i as u64)
+        } else {
+            u64::MAX
+        };
+        let mut bloom = 0u64;
+        if fast_base && !self.sched.futex.is_empty() {
+            for &(_, addr) in self.sched.futex.keys() {
+                bloom |= futex_bloom_mask(addr);
+            }
+        }
+        self.ctl
+            .io_synced_gen
+            .store(self.ctl.io.gen.load(Relaxed), Relaxed);
+        self.ctl.runnable_pos.store(pos, Relaxed);
+        self.ctl.futex_bloom.store(bloom, Relaxed);
+        self.ctl.sup_fast.store(fast, Relaxed);
         self.running = Some(to);
         let s = unsafe { &mut *self.ctl.slot(to) };
         unsafe { std::ptr::write_volatile(&mut s.rep, Reply { ret, flags }) };
-        s.go.store(1, SeqCst);
+        s.go.store(1, Release);
         futex_wake(&s.go as *const _ as *const u32, 1);
     }
 
@@ -463,13 +491,17 @@ impl Sup {
     /// After timer events fired: deliver timerfd expiries (each a decision record), then
     /// wake the I/O waiters if the generation moved.
     fn after_events(&mut self) {
-        let now = self.now();
-        for (key, count) in self.io.deliver_timers(&mut self.sched, self.ctl, now) {
-            self.decide(DEC_TIMERFD, 0, [key, count, 0, 0, 0, 0], 0);
+        if !self.sched.fired_timers.is_empty() {
+            let now = self.now();
+            for (key, count) in self.io.deliver_timers(&mut self.sched, self.ctl, now) {
+                self.decide(DEC_TIMERFD, 0, [key, count, 0, 0, 0, 0], 0);
+            }
         }
         // Machine events first: a heal re-stamps what the wire then delivers.
-        for key in std::mem::take(&mut self.sched.fired_machine) {
-            self.machine_event(key);
+        if !self.sched.fired_machine.is_empty() {
+            for key in std::mem::take(&mut self.sched.fired_machine) {
+                self.machine_event(key);
+            }
         }
         self.wire_step();
         self.io.sync(&mut self.sched, self.ctl);
@@ -1053,9 +1085,9 @@ impl Sup {
         );
         let mut planning = stall::Planning::default();
         loop {
-            if self.ctl.sup_word.load(SeqCst) == 0 {
+            if self.ctl.sup_word.load(Acquire) == 0 {
                 futex_wait_ms(&self.ctl.sup_word as *const _ as *const u32, 0, slice);
-                if self.ctl.sup_word.load(SeqCst) == 0 {
+                if self.ctl.sup_word.load(Acquire) == 0 {
                     if let Some(pid) = self.unexpected_death() {
                         let name = proc::comm(pid);
                         let st = if pid == self.child {
@@ -1073,12 +1105,13 @@ impl Sup {
                     });
                     let running = self.running;
                     let sched = &self.sched;
+                    let poll_now = now_ns();
                     // A plan being made for the holder: wall time only, progress here for
                     // the budget the broker gave it.
-                    if planning.counts(self.ctl.compute.planning.load(Relaxed), now_ns()) {
-                        dog.progress(self.ctl.seq.load(Relaxed), now_ns());
+                    if planning.counts(self.ctl.compute.planning.load(Relaxed), poll_now) {
+                        dog.progress(self.ctl.seq.load(Relaxed), poll_now);
                     }
-                    match dog.poll(self.ctl.seq.load(Relaxed), now_ns(), holder, || {
+                    match dog.poll(self.ctl.seq.load(Relaxed), poll_now, holder, || {
                         sched.waiting_besides(running)
                     }) {
                         stall::Poll::Quiet => {}
@@ -1093,13 +1126,13 @@ impl Sup {
                         stall::Poll::End(v)
                             if v.class == "infra" && self.ctl.debug.held.load(Relaxed) != 0 =>
                         {
-                            dog.progress(self.ctl.seq.load(Relaxed), now_ns());
+                            dog.progress(self.ctl.seq.load(Relaxed), poll_now);
                         }
                         stall::Poll::End(mut v) => {
                             if v.class == "stall" {
                                 v.detail += &stall::spin_host(self.ctl);
                             }
-                            if let Some(w) = planning.overdue(now_ns()) {
+                            if let Some(w) = planning.overdue(poll_now) {
                                 v.detail += &w;
                             }
                             self.finish(v)
@@ -1108,9 +1141,9 @@ impl Sup {
                     continue;
                 }
             }
-            self.ctl.sup_word.store(0, SeqCst);
-            dog.progress(self.ctl.seq.load(Relaxed), now_ns());
-            let idx = self.ctl.pending_slot.load(SeqCst) as usize;
+            self.ctl.sup_word.store(0, Relaxed);
+            dog.note_request();
+            let idx = self.ctl.pending_slot.load(Relaxed) as usize;
             let req = unsafe { std::ptr::read_volatile(&(*self.ctl.slot(idx)).req) };
             #[cfg(feature = "profile")]
             let t_op = now_ns();
@@ -1125,7 +1158,9 @@ impl Sup {
             // Timers due by now fire before the request is handled (their seq order).
             let now = self.now();
             self.sched.fire_due(now);
-            self.fire_signal_timers();
+            if !self.sched.due_timers.is_empty() || !self.sig.waiting.is_empty() {
+                self.fire_signal_timers();
+            }
             self.after_events();
             let pid = self.sched.entries[idx].pid;
             // Not while the turn holder is ending its process (`ProcExit`, a last thread's
@@ -1141,7 +1176,7 @@ impl Sup {
                 self.io.sync(&mut self.sched, self.ctl);
                 let (to, _) = self.choose();
                 self.decide(req.op, idx, req.args, to as i64);
-                dog.progress(self.ctl.seq.load(Relaxed), now_ns());
+                dog.note_request();
                 self.io.refresh(&self.sched, self.ctl);
                 self.reply(idx, to);
                 #[cfg(feature = "profile")]
@@ -1183,7 +1218,7 @@ impl Sup {
                     to
                 }
             };
-            dog.progress(self.ctl.seq.load(Relaxed), now_ns());
+            dog.note_request();
             self.io.refresh(&self.sched, self.ctl);
             self.reply(idx, to);
             #[cfg(feature = "profile")]

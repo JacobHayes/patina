@@ -126,7 +126,12 @@ pub fn walk(seed: u64, max: u64, key: u64) -> u64 {
 /// a tie, then the gap.
 pub fn arm(gap: Option<u64>, now_ns: u64, due_ns: u64, charge_ns: u64) -> (u64, u64) {
     let charge = charge_ns.max(1);
-    let due = due_ns.saturating_sub(now_ns).div_ceil(charge).max(1);
+    let diff = due_ns.saturating_sub(now_ns);
+    let due = if charge == 1 {
+        diff.max(1)
+    } else {
+        diff.div_ceil(charge).max(1)
+    };
     let gap = gap.unwrap_or(u64::MAX);
     if due <= gap.min(REFILL) {
         (due, REASON_DEADLINE)

@@ -129,7 +129,9 @@ pub struct Signals {
     pub procs: BTreeMap<i32, SigProc>,
     pub threads: Vec<SigThread>,
     /// Slots whose `wait_set` is set.
-    waiting: BTreeSet<usize>,
+    pub(crate) waiting: BTreeSet<usize>,
+    /// Number of processes in `procs` with a non-empty `pending.set`.
+    pub(crate) proc_pending_count: usize,
 }
 
 impl Signals {
@@ -138,6 +140,7 @@ impl Signals {
             procs: BTreeMap::new(),
             threads: vec![SigThread::default(); slots],
             waiting: BTreeSet::new(),
+            proc_pending_count: 0,
         }
     }
     fn set_wait(&mut self, s: usize, w: Option<u64>) {
@@ -240,6 +243,9 @@ impl Sup {
     /// changes only in the thread holding the turn, and nothing else runs before its next
     /// request.
     pub fn retarget(&mut self, pid: i32) {
+        if self.sig.proc_pending_count == 0 {
+            return;
+        }
         let Some(p) = self.sig.procs.get(&pid) else {
             return;
         };
@@ -342,7 +348,15 @@ impl Sup {
         }
         let added = match t {
             Target::Thread(s) => self.sig.threads[s].pending.add(sig, info),
-            Target::Proc(_) => self.sproc(pid).pending.add(sig, info),
+            Target::Proc(_) => {
+                let p = self.sproc(pid);
+                let was_empty = p.pending.set == 0;
+                let a = p.pending.add(sig, info);
+                if a && was_empty {
+                    self.sig.proc_pending_count += 1;
+                }
+                a
+            }
         };
         if !added {
             return;
@@ -409,7 +423,11 @@ impl Sup {
         } else {
             let p = self.sproc(pid);
             let sig = p.pending.next(allowed)?;
-            (sig, p.pending.take(sig).unwrap())
+            let info = p.pending.take(sig).unwrap();
+            if p.pending.set == 0 {
+                self.sig.proc_pending_count -= 1;
+            }
+            (sig, info)
         };
         unsafe { std::ptr::write_volatile(&mut (*self.ctl.slot(s)).siginfo, info) };
         self.refresh_pending(pid);
@@ -418,6 +436,9 @@ impl Sup {
 
     /// Clear the wait state of threads no longer parked (woken by a timeout).
     pub fn sweep_waits(&mut self) {
+        if self.sig.waiting.is_empty() {
+            return;
+        }
         let done: Vec<usize> = self
             .sig
             .waiting
@@ -589,7 +610,12 @@ impl Sup {
                 self.sproc(pid).kinds[sig as usize] = kind;
                 if kind == SIGK_IGNORE {
                     // POSIX: setting a pending signal to be ignored discards it.
-                    self.sproc(pid).pending.flush(sig);
+                    let p = self.sproc(pid);
+                    let was_nz = p.pending.set != 0;
+                    p.pending.flush(sig);
+                    if was_nz && p.pending.set == 0 {
+                        self.sig.proc_pending_count -= 1;
+                    }
                     for s in self.threads_of(pid) {
                         self.sig.threads[s].pending.flush(sig);
                     }

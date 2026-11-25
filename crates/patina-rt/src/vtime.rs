@@ -112,6 +112,35 @@ pub fn touch(key: u64, which: Which) {
     }
 }
 
+/// Combined `touch` + `names` in a single hash table lookup.
+#[inline]
+pub fn touch_with_names(key: u64, which: Which, gone_dev: u64) {
+    let t = now();
+    if let Some(e) = slot(key, true) {
+        match which {
+            Which::Create => {
+                *e = VtEntry {
+                    key,
+                    atime: t,
+                    mtime: t,
+                    ctime: t,
+                    btime: t,
+                    gone_dev,
+                };
+            }
+            Which::Modify => {
+                e.mtime = t;
+                e.ctime = t;
+                e.gone_dev = gone_dev;
+            }
+            Which::Change => {
+                e.ctime = t;
+                e.gone_dev = gone_dev;
+            }
+        }
+    }
+}
+
 /// Times of the inode (the virtual epoch for an inode never changed in this run).
 pub fn get(key: u64) -> VtEntry {
     let found = if key == 0 { None } else { slot(key, false) };
