@@ -9,3 +9,7 @@ description = "Shared layout, configuration, request protocol, boundary record a
 [lib]
 name = "proto"
 path = "src/lib.rs"
+
+[features]
+# Fine-grained inner-loop profiling counters in shared Ctl memory (zero overhead when off).
+profile = []

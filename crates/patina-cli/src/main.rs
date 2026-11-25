@@ -22,6 +22,7 @@ mod launcher;
 mod log;
 mod minimize;
 mod outcome;
+mod profile;
 mod ready;
 mod recheck;
 mod replay;
@@ -174,16 +175,36 @@ fn out_dir(a: &Args, default: String) -> Result<PathBuf, Fail> {
 }
 
 fn run(a: &Args) -> Result<ExitCode, Fail> {
+    let prof = profile::enabled();
+    let t_start = profile::stamp();
     let cfg = config::resolve(a).map_err(error)?;
     let o = cfg.opts().map_err(error)?;
+    let t_cfg = profile::stamp();
     launch::preflight(&o).map_err(error)?;
+    let t_pre = profile::stamp();
     let out = out_dir(a, format!("patina-out/run-{}", cfg.seed))?;
+    let t_out = profile::stamp();
     let cpu = launch::default_cpu();
-    let (_, r) = launch::run_one(&o, &out, cpu, false).map_err(internal)?;
+    let mut pre_spans = Vec::new();
+    if prof {
+        pre_spans.push(profile::Span::new(
+            "cli_config_resolve",
+            "cli",
+            t_start,
+            t_cfg,
+        ));
+        pre_spans.push(profile::Span::new("preflight", "launcher", t_cfg, t_pre));
+        pre_spans.push(profile::Span::new("out_dir_clear", "cli", t_pre, t_out));
+    }
+    let (_, r, rp) =
+        launch::run_one_profiled(&o, &out, cpu, false, t_start, pre_spans).map_err(internal)?;
     if a.json() {
         println!("{}", serde_json::to_string_pretty(&r).unwrap());
     } else {
         result::print_human(&r, &out);
+    }
+    if let Some(rp) = rp {
+        rp.emit();
     }
     Ok(ExitCode::from(r["exit"].as_u64().unwrap_or(2) as u8))
 }

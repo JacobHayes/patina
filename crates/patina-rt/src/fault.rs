@@ -67,6 +67,7 @@ pub extern "C" fn on_fault(sig: i32, info: *mut SigInfo, uc: *mut Frame) {
         }
         crate::sup::host_error(sig as i64, pc, proto::ctl::HE_GUEST_FAULT_IN_RUNTIME);
     }
+    let t0 = crate::profile::now_ns();
     crate::spin::enter(thread(), Some(frame), false);
     crate::compute::enter(thread());
     let info: SigInfo = unsafe { core::ptr::read(info) };
@@ -76,6 +77,7 @@ pub extern "C" fn on_fault(sig: i32, info: *mut SigInfo, uc: *mut Frame) {
             crate::entry::check_real_mask(frame);
             crate::compute::exit(thread());
             crate::spin::walk_go(thread(), frame);
+            crate::profile::record_fault(crate::profile::now_ns().saturating_sub(t0));
             return;
         }
     }
@@ -97,6 +99,7 @@ pub extern "C" fn on_fault(sig: i32, info: *mut SigInfo, uc: *mut Frame) {
     sig::trap_exit(frame, None);
     crate::entry::check_real_mask(frame);
     crate::compute::exit(thread());
+    crate::profile::record_fault(crate::profile::now_ns().saturating_sub(t0));
 }
 
 /// A debug session in which gdb passes `SIGTRAP` on (`patina debug`'s helper, for the runs

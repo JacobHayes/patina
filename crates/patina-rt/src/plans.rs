@@ -318,12 +318,14 @@ pub fn on_map(a: u64, len: u64, prot: u64, map_prot: u64, fd: u64, off: u64) {
     if !on() || proc().plans.lines {
         return;
     }
+    let t0 = crate::profile::now_ns();
     let Some((w, plan)) = (if prot & PROT_WRITE == 0 {
         ask(fd, off)
     } else {
         None
     }) else {
         count(proto::ctl::PLAN_UNPLANNED);
+        crate::profile::record_plan_on_map(crate::profile::now_ns().saturating_sub(t0));
         return;
     };
     let done = apply(a, len, map_prot, fd, off, &w, plan);
@@ -333,6 +335,7 @@ pub fn on_map(a: u64, len: u64, prot: u64, map_prot: u64, fd: u64, off: u64) {
     } else {
         proto::ctl::PLAN_UNPLANNED
     });
+    crate::profile::record_plan_on_map(crate::profile::now_ns().saturating_sub(t0));
 }
 
 fn apply(
@@ -648,7 +651,12 @@ pub fn try_point(
         return false;
     }
     let Some((img, row)) = site_at(pc) else {
-        return entry(frame, sig, info);
+        let t0 = crate::profile::now_ns();
+        let ok = entry(frame, sig, info);
+        if ok {
+            crate::profile::record_plan_entry(crate::profile::now_ns().saturating_sub(t0));
+        }
+        return ok;
     };
     if sig as u64 == crate::sys::sig::SIGSEGV && info[2] & !(PAGE - 1) == CELL {
         crate::compute::cell_lost(-e::EFAULT, false);
@@ -658,9 +666,11 @@ pub fn try_point(
     if !is_trap(sig, info) || pc != trap {
         return false;
     }
+    let t0 = crate::profile::now_ns();
     count(proto::ctl::PLAN_POINTS);
     crate::compute::point(crate::state::thread(), frame, shown(pc), true);
     frame.set_pc(pc + TRAP_LEN);
+    crate::profile::record_plan_trap(crate::profile::now_ns().saturating_sub(t0));
     true
 }
 

@@ -76,14 +76,38 @@ impl Queue {
 }
 
 pub fn main(a: &Args) -> Result<ExitCode, Fail> {
+    let prof = crate::profile::enabled();
+    let mut bp = prof.then(|| crate::profile::BatchProfile::new(crate::profile::stamp()));
+
+    let t0 = crate::profile::stamp();
     let cfg = crate::config::resolve(a).map_err(error)?;
     let base_opts = Arc::new(cfg.opts().map_err(error)?);
+    if let Some(p) = bp.as_mut() {
+        p.push_startup("cli_config_resolve", "cli", t0);
+    }
+
+    let t0 = crate::profile::stamp();
     crate::launch::preflight(&base_opts).map_err(error)?;
+    if let Some(p) = bp.as_mut() {
+        p.push_startup("preflight", "launcher", t0);
+    }
 
     // Warm runtime file, sandbox static caches, and rewrite planner ONCE.
+    let t0 = crate::profile::stamp();
     let _ = crate::launch::rt_file().map_err(internal)?;
+    if let Some(p) = bp.as_mut() {
+        p.push_startup("rt_warm", "launcher", t0);
+    }
+    let t0 = crate::profile::stamp();
     let _ = crate::launch::layout(&base_opts, base_opts.cfg.disk.as_deref()).map_err(internal)?;
+    if let Some(p) = bp.as_mut() {
+        p.push_startup("layout_warm", "launcher", t0);
+    }
+    let t0 = crate::profile::stamp();
     let planner = Arc::new(crate::launcher::boots::warm_planner(&base_opts).map_err(internal)?);
+    if let Some(p) = bp.as_mut() {
+        p.push_startup("planner_warm", "launcher", t0);
+    }
 
     let cpus = crate::launch::allowed_cpus();
     let default_jobs = cpus.len().clamp(1, 8);
@@ -92,6 +116,10 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         Some(j) => j.min(cpus.len().max(1)),
         None => default_jobs,
     };
+    if let Some(p) = bp.as_mut() {
+        p.jobs_configured = jobs;
+    }
+    let bp = bp.map(Arc::new);
 
     let tmp_root =
         Arc::new(std::env::temp_dir().join(format!("patina-batch-{}", std::process::id())));
@@ -110,6 +138,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         let planner = Arc::clone(&planner);
         let out_lock = Arc::clone(&stdout);
         let tmp_root = Arc::clone(&tmp_root);
+        let bp = bp.clone();
         let h = std::thread::Builder::new()
             .name(format!("patina-batch-{worker_idx}"))
             .spawn(move || {
@@ -121,10 +150,12 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                         seed,
                         &item.req,
                         item.seq,
+                        worker_idx,
                         cpu,
                         &base,
                         planner.as_ref().as_ref(),
                         &tmp_root,
+                        bp.as_deref(),
                     );
                     let mut w = out_lock.lock().unwrap();
                     let _ = serde_json::to_writer(&mut *w, &resp);
@@ -175,6 +206,9 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         let _ = h.join();
     }
     let _ = fs::remove_dir_all(&*tmp_root);
+    if let Some(bp) = bp {
+        bp.emit(crate::profile::stamp());
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -184,11 +218,14 @@ fn run_item(
     seed: u64,
     req: &BatchReq,
     seq: u64,
+    worker_idx: usize,
     cpu: usize,
     base: &Opts,
     planner: Option<&crate::launcher::plans::Planner>,
     tmp_root: &std::path::Path,
+    bp: Option<&crate::profile::BatchProfile>,
 ) -> serde_json::Value {
+    let t_job_start = crate::profile::stamp();
     let opts = match base.for_batch(seed, &req.args) {
         Ok(o) => o,
         Err(e) => {
@@ -236,7 +273,7 @@ fn run_item(
         }
     }
 
-    let end = match crate::launcher::boots::run_chain_with_planner(
+    let mut end = match crate::launcher::boots::run_chain_with_planner(
         &opts, &run_dir, cpu, false, planner,
     ) {
         Ok(end) => end,
@@ -255,11 +292,33 @@ fn run_item(
 
     let c = crate::result::classified(&end);
     let mut r = crate::result::result_json(&end, &c);
+    let job_timing = bp.map(|_| {
+        let t_job_end = crate::profile::stamp();
+        crate::profile::BatchJobTiming {
+            id,
+            seed,
+            worker_idx,
+            cpu,
+            outcome: c.outcome.name().to_string(),
+            traps: end.traps,
+            switches: end.switches,
+            t_start_ns: t_job_start,
+            t_end_ns: t_job_end,
+            boots: std::mem::take(&mut end.profile_boots),
+        }
+    });
+    let timing_val = job_timing.as_ref().map(|jt| jt.to_timing_json());
     if keep {
         r["signature"] = crate::signature::of(&r, &run_dir);
+        if let Some(t) = &timing_val {
+            r["timing"] = t.clone();
+        }
         let _ = crate::result::write_json(&run_dir.join("result.json"), &r);
     } else {
         let _ = fs::remove_dir_all(&run_dir);
+    }
+    if let (Some(bp), Some(jt)) = (bp, job_timing) {
+        bp.record_job(jt);
     }
 
     let mut resp = json!({
@@ -276,6 +335,9 @@ fn run_item(
     }
     if keep {
         resp["dir"] = json!(run_dir);
+    }
+    if let Some(t) = timing_val {
+        resp["timing"] = t;
     }
     resp
 }

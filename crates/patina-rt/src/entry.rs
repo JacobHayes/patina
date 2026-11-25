@@ -303,6 +303,7 @@ pub fn maybe_yield(ts: &ThreadState) {
 
 /// The trap entry: SIGSYS for every guest syscall.
 pub extern "C" fn on_sigsys(_sig: i32, _info: *mut u8, uc: *mut Frame) {
+    let t0 = crate::profile::now_ns();
     let ts = thread();
     let frame = unsafe { &mut *uc };
     let pc = frame.pc();
@@ -328,6 +329,9 @@ pub extern "C" fn on_sigsys(_sig: i32, _info: *mut u8, uc: *mut Frame) {
         crate::sys::sig::trap_exit(frame, None);
         check_real_mask(frame_of(uc));
         crate::compute::exit(thread());
+        let dt = crate::profile::now_ns().saturating_sub(t0);
+        crate::profile::record_sigsys(dt);
+        crate::profile::record_syscall(proto::sdk::SYSCALL, dt);
         return;
     }
     charge(ts);
@@ -362,6 +366,9 @@ pub extern "C" fn on_sigsys(_sig: i32, _info: *mut u8, uc: *mut Frame) {
     }
     check_real_mask(frame_of(uc));
     crate::compute::exit(thread());
+    let dt = crate::profile::now_ns().saturating_sub(t0);
+    crate::profile::record_sigsys(dt);
+    crate::profile::record_syscall(nr, dt);
 }
 
 fn frame_of<'a>(uc: *mut Frame) -> &'a Frame {

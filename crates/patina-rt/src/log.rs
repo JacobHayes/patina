@@ -70,6 +70,7 @@ pub fn append(rec: &Rec) {
         return;
     }
     #[allow(unreachable_code)]
+    let t0 = crate::profile::now_ns();
     let c = ctl();
     if over_limit() {
         crate::sup::log_limit();
@@ -86,6 +87,7 @@ pub fn append(rec: &Rec) {
     c.log_len.store(off + REC_SIZE as u64, Relaxed);
     c.log_hash
         .store(chain(c.log_hash.load(Relaxed), rec), Relaxed);
+    crate::profile::record_log_append(crate::profile::now_ns().saturating_sub(t0));
 }
 
 /// Hash `n` guest bytes at `p`. Memory the guest named but cannot be read (a call that wrote
@@ -234,6 +236,7 @@ pub fn trap(row: &Row, call: &dyn crate::trap::Call, ret: i64) {
         return;
     }
     #[allow(unreachable_code)]
+    let t0 = crate::profile::now_ns();
     let nr = call.nr();
     // Only the registers the call reads (`proto::table::nargs`): the others are zero here, in
     // the record and for the hashes (a pointer the call ignores names nothing).
@@ -247,6 +250,7 @@ pub fn trap(row: &Row, call: &dyn crate::trap::Call, ret: i64) {
     if c.config.observe != 0 {
         observe(row, nr, args, ret);
     }
+    crate::profile::record_log_trap(crate::profile::now_ns().saturating_sub(t0));
 }
 
 /// `trap` without `log_paths`: the record, and an SDK call's strings.

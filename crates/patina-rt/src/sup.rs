@@ -83,13 +83,16 @@ fn debugger_signals(set: u64) -> u64 {
 }
 
 fn call_sup_raw(op: Op, args: [u64; 6]) -> Reply {
-    unsafe {
+    let t0 = crate::profile::now_ns();
+    let rep = unsafe {
         let slot = post(op, args);
         while (*slot).go.load(Acquire) == 0 {
             futex_wait(&(*slot).go as *const _ as *const u32, 0);
         }
         core::ptr::read_volatile(&(*slot).rep)
-    }
+    };
+    crate::profile::record_sup_ipc(crate::profile::now_ns().saturating_sub(t0));
+    rep
 }
 
 /// Send a request the supervisor never answers (exit); the caller exits right after.

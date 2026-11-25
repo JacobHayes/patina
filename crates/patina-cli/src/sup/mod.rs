@@ -1112,6 +1112,8 @@ impl Sup {
             dog.progress(self.ctl.seq.load(Relaxed), now_ns());
             let idx = self.ctl.pending_slot.load(SeqCst) as usize;
             let req = unsafe { std::ptr::read_volatile(&(*self.ctl.slot(idx)).req) };
+            #[cfg(feature = "profile")]
+            let t_op = now_ns();
             self.running = None;
             self.exit_barrier_first(idx, req.op);
             // A runtime dropped a tracked mapping or started an image: slots of files nothing
@@ -1142,6 +1144,11 @@ impl Sup {
                 dog.progress(self.ctl.seq.load(Relaxed), now_ns());
                 self.io.refresh(&self.sched, self.ctl);
                 self.reply(idx, to);
+                #[cfg(feature = "profile")]
+                unsafe {
+                    proto::profile::ProfileTab::at(self.ctl as *const Ctl as *mut u8)
+                        .record_sup_op(req.op as usize, now_ns().saturating_sub(t_op));
+                }
                 continue;
             }
             let next = self.handle(idx, req);
@@ -1179,6 +1186,11 @@ impl Sup {
             dog.progress(self.ctl.seq.load(Relaxed), now_ns());
             self.io.refresh(&self.sched, self.ctl);
             self.reply(idx, to);
+            #[cfg(feature = "profile")]
+            unsafe {
+                proto::profile::ProfileTab::at(self.ctl as *const Ctl as *mut u8)
+                    .record_sup_op(req.op as usize, now_ns().saturating_sub(t_op));
+            }
         }
     }
 }
@@ -1195,6 +1207,10 @@ pub(crate) fn now_ns() -> u64 {
 }
 
 pub fn main(args: &[String]) -> Res<ExitCode> {
+    main_with_sandbox_times(args, [0, 0])
+}
+
+pub fn main_with_sandbox_times(args: &[String], sandbox_times: [u64; 2]) -> Res<ExitCode> {
     let mut env: Vec<String> = BASE_ENV.iter().map(|s| s.to_string()).collect();
     let mut cmd: Vec<String> = vec![];
     // `HIDDEN:DST`: trees the launcher bound at a hidden place, copied to DST.
@@ -1283,6 +1299,12 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
     let ctl: &'static Ctl = unsafe { Ctl::at(ctl_ptr) };
     if !ctl.check() {
         return Err("control region magic mismatch".into());
+    }
+    if sandbox_times[0] != 0 {
+        ctl.timing[proto::ctl::TM_SANDBOX_PID1].store(sandbox_times[0], Relaxed);
+    }
+    if sandbox_times[1] != 0 {
+        ctl.timing[proto::ctl::TM_SANDBOX_SETUP].store(sandbox_times[1], Relaxed);
     }
     ctl.timing[TM_SUP_START].store(now_ns(), Relaxed);
     let log_base = unsafe {

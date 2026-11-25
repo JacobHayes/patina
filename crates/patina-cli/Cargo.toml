@@ -10,6 +10,10 @@ description = "The patina binary: launcher, supervisor and log tools, with the r
 name = "patina"
 path = "src/main.rs"
 
+[features]
+# Enable compile-time fine-grained inner-loop profiling in patina-rt and supervisor IPC.
+profile = ["proto/profile"]
+
 [dependencies]
 proto = { package = "patina-proto", path = "../patina-proto" }
 libc = "0.2"

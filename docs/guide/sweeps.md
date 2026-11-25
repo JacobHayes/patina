@@ -163,6 +163,26 @@ that is removed after the response is emitted.
 printf '{"id":1,"seed":1}\n{"id":2,"seed":2}\n' | patina batch -j 8 -- ./app
 ```
 
+## Self-profiling
+
+Set `PATINA_PROFILE=1` to print a phase-by-phase wall-time waterfall on stderr (covering CLI
+setup, preflight, rewrite-plan warming, sandbox mounts, supervisor init, guest execution,
+teardown, and result writing) and attach a `timing` object to `result.json` or `patina batch`
+responses. Set `PATINA_PROFILE=json` for machine-readable JSON on stderr, or
+`PATINA_PROFILE_OUT=trace.json` to write a Chrome Trace Event file (openable in Perfetto UI or
+`chrome://tracing`). Leaving both unset adds zero output and leaves `result.json` and
+deterministic digests unchanged.
+
+For fine-grained in-guest inner-loop breakdown (per-syscall trap counts and host time,
+supervisor IPC latency, compute points, load-time plans, and boundary logging), build
+`patina-cli` with the `profile` Cargo feature enabled and run with `PATINA_PROFILE=1`:
+
+<!-- no-run self-profile-build: build patina with inner-loop profiling enabled -->
+```sh
+cargo build --release -p patina-cli --features profile
+PATINA_PROFILE=1 patina run -- ./app
+```
+
 ## If a sweep finds nothing
 
 In order of what helps most: more seeds (a narrow window is one seed in thousands);

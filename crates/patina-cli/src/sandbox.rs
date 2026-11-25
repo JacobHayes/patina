@@ -1282,6 +1282,7 @@ fn stamp(p: &Path) -> std::io::Result<()> {
 
 /// PID 1: the layout, the guests' user namespace, then the command.
 fn pid1(spec: &Spec, chan: OwnedFd) -> ! {
+    let t_pid1 = crate::launch::mono_ns();
     let fail = |e: String| -> ! {
         eprintln!("patina sandbox: {e}");
         unsafe { libc::_exit(1) }
@@ -1289,6 +1290,7 @@ fn pid1(spec: &Spec, chan: OwnedFd) -> ! {
     if let Err(e) = setup(spec, &chan) {
         fail(e);
     }
+    let t_setup = crate::launch::mono_ns();
     match &spec.after {
         // With machines, the supervisor asks the keeper to start them through PID 1's end.
         After::Exec if spec.machines.is_some() => {
@@ -1312,7 +1314,7 @@ fn pid1(spec: &Spec, chan: OwnedFd) -> ! {
                 libc::clearenv();
                 libc::setenv(c"PWD".as_ptr(), pwd.as_ptr(), 1);
             }
-            let code = match crate::sup::main(args) {
+            let code = match crate::sup::main_with_sandbox_times(args, [t_pid1, t_setup]) {
                 Ok(c) => {
                     if c == ExitCode::SUCCESS {
                         0

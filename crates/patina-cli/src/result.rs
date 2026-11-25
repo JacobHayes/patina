@@ -67,6 +67,10 @@ pub struct RunEnd {
     pub settle: Option<[u64; 2]>,
     /// A run with a `ready` probe: when each machine was first ready (`ready_json`).
     pub ready: Option<Value>,
+    /// Coarse phase profiling: planner warm span (populated only when `PATINA_PROFILE` is on).
+    pub planner_span: Option<crate::profile::Span>,
+    /// Coarse phase profiling: per-boot timings (populated only when `PATINA_PROFILE` is on).
+    pub profile_boots: Vec<crate::profile::BootTiming>,
 }
 
 /// `result.json`'s `ready`: each machine (main first) and the virtual time, in ms as the
