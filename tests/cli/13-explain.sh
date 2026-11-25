@@ -1,4 +1,4 @@
-# 13. `patina explain RUNDIR` on the acklog example's crash bug (the first violating seed of
+# 13. `patina inspect story RUNDIR` on the acklog example's crash bug (the first violating seed of
 #    1-64 under `--faults crash`: about one seed in five violates, and which do depends on the
 #    host): the observed replay is the run (its digest, and the
 #    observations are in RUNDIR/explain, not in its boundary log); the story is shorter than the
@@ -18,14 +18,14 @@ for s in $(seq 1 64); do
 done
 [ -n "$r" ] || die "acklog: no violation in seeds 1-64"
 echo "acklog: seed $s violates: $(field "$r/result.json" message)"
-st=0; timeout 60 "$PATINA" explain "$r" --format json >"$r.story" 2>"$r.err" || st=$?
+st=0; timeout 60 "$PATINA" inspect story "$r" --format json >"$r.story" 2>"$r.err" || st=$?
 [ "$st" = 0 ] || die "explain: exit $st ($(cat "$r.err"))"
 lhs=$(field "$r/explain/result.json" digest); rhs=$(field "$r/result.json" digest)
 [ "$lhs" = "$rhs" ] || die "the observed replay's digest differs"
 obs=$(stat -c %s "$r/explain/boot-1/observe.log")
 [ "$obs" -gt 0 ] || die "no observations"
 cmp -s "$r/boot-1/boundary.log" "$r/explain/boot-1/boundary.log" || die "the observed replay's boundary log is not the run's"
-"$PATINA" log events "$r" >"$r.events"
+"$PATINA" inspect events "$r" >"$r.events"
 python3 -I - "$r" <<'EOF' || die "the story"
 import json, sys
 r = sys.argv[1]
@@ -44,7 +44,7 @@ label = result["message"].split(":")[0].strip()
 print(f"story: {len(lines)} lines for {len(events)} events; stop at event {stop['seq']}; label {label}")
 EOF
 n=$(jq -s '.[-1].seq' "$r.story")
-"$PATINA" log events "$r" --from "$n" --to "$n" | tail -1 >"$r.stop"
+"$PATINA" inspect events "$r" --from "$n" --to "$n" | tail -1 >"$r.stop"
 [ "$(field "$r.stop" type)" = sdk ] && [ "$(field "$r.stop" op)" = assert ] || die "the stop event is not an assertion: $(cat "$r.stop")"
 case "$(field "$r/result.json" message)" in "$(field "$r.stop" label)"*) ;; *) die "the stop event is another assertion: $(cat "$r.stop")" ;; esac
 echo "stop event $n: $(cat "$r.stop")"
@@ -53,7 +53,7 @@ echo "stop event $n: $(cat "$r.stop")"
 p=""
 for n in $(seq 1 12); do
     prun "$RUNS/proc-$n" --seed 1 --faults kill --fault crash-at="$n" -- "$PATINA_GUESTS/examples/acklog"
-    "$PATINA" log events "$RUNS/proc-$n" >"$RUNS/proc-$n.events"
+    "$PATINA" inspect events "$RUNS/proc-$n" >"$RUNS/proc-$n.events"
     if python3 -I -c 'import json, sys
 since = {}
 for e in map(json.loads, open(sys.argv[1])):
@@ -64,7 +64,7 @@ for e in map(json.loads, open(sys.argv[1])):
 sys.exit(1)' "$RUNS/proc-$n.events"; then p=$RUNS/proc-$n; break; fi
 done
 [ -n "$p" ] || die "acklog: no process crash after an unsynced write in points 1-12"
-timeout 60 "$PATINA" explain "$p" --format json >"$p.story" || die "explain of a process crash"
+timeout 60 "$PATINA" inspect story "$p" --format json >"$p.story" || die "explain of a process crash"
 python3 -I -c 'import json,sys; ls=[json.loads(l) for l in open(sys.argv[1])]
 assert any(l["kind"] == "crash" for l in ls), "no crash line"
 bad=[l["text"] for l in ls if l["kind"] == "unsynced"]
@@ -73,8 +73,8 @@ echo "process crash at point $n: no unsynced writes listed"
 # A thread of another process than the first is named with that process's id, the one its
 # Hello event carries.
 prun "$RUNS/pipe" --seed 1 -- /bin/sh -c 'echo one | cat'
-timeout 60 "$PATINA" explain "$RUNS/pipe" --full --format json >"$RUNS/pipe.story" || die "explain of a pipeline"
-"$PATINA" log events "$RUNS/pipe" --types sched >"$RUNS/pipe.sched"
+timeout 60 "$PATINA" inspect story "$RUNS/pipe" --full --format json >"$RUNS/pipe.story" || die "explain of a pipeline"
+"$PATINA" inspect events "$RUNS/pipe" --types sched >"$RUNS/pipe.sched"
 python3 -I -c 'import json,sys
 pids = {e["slot"]: e["pid"] for e in map(json.loads, open(sys.argv[2])) if e.get("op") == "Hello"}
 whos = {l["who"] for l in map(json.loads, open(sys.argv[1])) if l.get("who")}
@@ -86,14 +86,14 @@ for w in named:
 print("pipeline actors:", sorted(whos))' "$RUNS/pipe.story" "$RUNS/pipe.sched" || die "process names in the story"
 # Again: the replay is reused (its result is not rewritten).
 m=$(stat -c %Y.%y "$r/explain/result.json")
-timeout 60 "$PATINA" explain "$r" >"$r.text"
+timeout 60 "$PATINA" inspect story "$r" >"$r.text"
 m2=$(stat -c %Y.%y "$r/explain/result.json")
 [ "$m2" = "$m" ] || die "the second explain replayed again"
 # A run made by another patina build is refused before anything runs.
 cp -r "$r" "$RUNS/other"
 rm -rf "${RUNS:?}/other/explain"
 python3 -I -c 'import json,sys; p=sys.argv[1]; r=json.load(open(p)); r["patina"]="0.0.1 "+"0"*64; json.dump(r,open(p,"w"))' "$RUNS/other/run.json"
-st=0; timeout 60 "$PATINA" explain "$RUNS/other" >"$RUNS/other.txt" 2>&1 || st=$?
+st=0; timeout 60 "$PATINA" inspect story "$RUNS/other" >"$RUNS/other.txt" 2>&1 || st=$?
 [ "$st" = "$(exit_of error)" ] || die "other build: exit $st ($(cat "$RUNS/other.txt"))"
 [ ! -e "$RUNS/other/explain" ] || die "other build: an explain directory was made"
 echo "other build: refused: $(head -1 "$RUNS/other.txt")"

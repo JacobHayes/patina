@@ -1672,7 +1672,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         lowered_to: Some(st.width).filter(|w| *w != width),
         stopped: st.stopped.clone(),
     };
-    let mut again = "patina report --group N".to_string();
+    let mut again = "patina inspect summary --group N".to_string();
     if let Some(k) = &known_file {
         again.push_str(&format!(
             " --known {}",

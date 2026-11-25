@@ -17,7 +17,7 @@ arm=0
 m=$(uname -m)
 [ "$m" != aarch64 ] || arm=1
 seq_of() {
-    "$PATINA" log events "$1" | python3 -I -c 'import json,sys
+    "$PATINA" inspect events "$1" | python3 -I -c 'import json,sys
 ev = [json.loads(l) for l in sys.stdin]
 print(next(e["seq"] for e in ev if "seq" in e and eval(sys.argv[1])))' "$2"
 }

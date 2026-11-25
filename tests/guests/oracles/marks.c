@@ -1,4 +1,4 @@
-/* marks MODE: SDK marks whose labels `patina log events` shows in clear.
+/* marks MODE: SDK marks whose labels `patina inspect events` shows in clear.
  *   edge     a 255-byte label; a label with a newline, a quote, a backslash, a byte that is not
  *            UTF-8 and a NUL; a mark with text; a payload ending at the end of a mapping;
  *            payloads at a bad pointer and across the end of a mapping (EFAULT, no label).

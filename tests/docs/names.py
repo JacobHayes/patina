@@ -7,7 +7,7 @@ ARCHITECTURE.md. ./check docs runs their command blocks (transcripts.py); this c
 around them, which no command runs:
 
 - In code (`sh` fences, `$` lines of `text` fences, inline code spans), each `patina COMMAND
-  ...` names a command; `log` a word of that command's usage; each option, one the command takes
+  ...` names a command (or group and subcommand); each option, one the command takes
   (in the guide, also an inline span that starts with an option: one some command takes);
   `--fault KEY=V` and a span `KEY=V`, a fault key; `--faults A,B`, fault classes (or `all`); an
   option whose value is a list of words, one of them. Anywhere, `[TABLE] KEY` names a
@@ -17,9 +17,9 @@ around them, which no command runs:
 - Every command appears as `patina COMMAND`, every class as a `--faults` value and every outcome
   in an Outcome table somewhere in the guide: a new one fails here until the guide says when
   to use it.
-- The skill (skills/patina/SKILL.md, which `patina skill` writes) is a pointer that must not go
+- The skill (skills/patina/SKILL.md, which `patina guide skill` writes) is a pointer that must not go
   stale: frontmatter `name: patina` and a description; no code block; its only code spans are
-  `patina guide`, `patina doctor` and `patina skill` (with a placeholder argument); and nowhere an
+  `patina guide`, `patina doctor` and `patina guide skill` (with a placeholder argument); and nowhere an
   option, a fault key or a patina.toml table or key.
 
 An existence check of names, not of wording. Prints each name it does not know, with its place.
@@ -51,6 +51,7 @@ def vocabulary(patina):
     d = json.loads(text)
     v = {"test_inputs": "PATINA_TEST_" in text,
          "commands": {c["name"]: c for c in d["commands"]},
+         "groups": {g["name"]: g for g in d.get("groups", [])},
          "flags": {f["name"]: f for f in d["flags"]},
          "keys": {k["name"] for k in d["faults"]["keys"]},
          "classes": {p["name"] for p in d["faults"]["classes"]} | {"all"},
@@ -60,9 +61,6 @@ def vocabulary(patina):
     for f in d["flags"]:
         for s in re.findall(r"\balso (-[a-zA-Z]) ", f["help"]):
             v["short"][s] = f["name"]
-    # A command's second words (log tree): the lower-case words of its usage.
-    v["words"] = {n: set(re.findall(r"(?<![-\w])([a-z]+)(?![-\w])", c["usage"])) - {"patina", n}
-                  for n, c in v["commands"].items()}
     return v
 
 
@@ -198,20 +196,24 @@ def check_file(path, v, bad, seen, doc=False):
             if words[0] in ("--version", "--help") or words[0].startswith("__") \
                     or words[0] in GDB:
                 continue
-            cmd = words[0]
-            if cmd not in v["commands"]:
-                bad.append(f"{where}: no command patina {cmd}")
+            if len(words) >= 2 and f"{words[0]} {words[1]}" in v["commands"]:
+                cmd = f"{words[0]} {words[1]}"
+                rest = words[2:]
+            elif words[0] in v["commands"]:
+                cmd = words[0]
+                rest = words[1:]
+            elif words[0] in v["groups"]:
+                rest = words[1:]
+                if not rest or rest[0].startswith("-") or PLACEHOLDER.search(rest[0]):
+                    continue
+                bad.append(f"{where}: no command patina {words[0]} {rest[0]}")
+                continue
+            else:
+                bad.append(f"{where}: no command patina {words[0]}")
                 continue
             seen["commands"].add(cmd)
             if cmd == "ctl":  # its words are the control call's (`kill NAME`)
                 continue
-            rest = words[1:]
-            if cmd == "log" and rest and not rest[0].startswith("-") \
-                    and not PLACEHOLDER.search(rest[0]):
-                if rest[0] not in v["words"][cmd]:
-                    bad.append(f"{where}: no patina {cmd} {rest[0]} "
-                               f"(usage: {v['commands'][cmd]['usage']})")
-                rest = rest[1:]
             check_words(where, cmd, rest, v, bad, seen)
         if found or kind != "span" or (doc and text.startswith("-")):
             continue
@@ -264,9 +266,9 @@ def check_skill(v, bad):
         if re.search(r"\[(run|faults|sched|sweep|machine)\b", line):
             bad.append(f"{rel}:{no}: a patina.toml table: config belongs in patina guide")
     for no, span, kind in pieces:
-        if kind == "span" and not re.fullmatch(r"patina (guide|doctor|skill)( [A-Z]+)?", span):
+        if kind == "span" and not re.fullmatch(r"patina (guide( skill)?|doctor)( [A-Z]+)?", span):
             bad.append(f"{rel}:{no}: `{span}`: the skill names only `patina guide`, `patina doctor` "
-                       "and `patina skill`")
+                       "and `patina guide skill`")
 
 
 def main():

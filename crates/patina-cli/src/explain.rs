@@ -40,7 +40,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     let err = |e: String| Fail(Outcome::Error, e);
     let [rundir] = a.positional.as_slice() else {
         return Err(err(
-            "usage: patina explain RUNDIR [--from SEQ] [--to SEQ] [--full]".into(),
+            "usage: patina inspect story RUNDIR [--from SEQ] [--to SEQ] [--full]".into(),
         ));
     };
     let rundir = PathBuf::from(rundir);
@@ -586,7 +586,7 @@ impl Story {
                 w,
                 "note: no thread exchanged anything through the log before the failure (no message, file change, fault or cut), \
                  and the run was preempted {} times in computation: a race between system calls, in the program's own memory, \
-                 is not in the log, so this story cannot show its cause. `patina log events {} --types preempt,call` lists \
+                 is not in the log, so this story cannot show its cause. `patina inspect events {} --types preempt,call` lists \
                  where the threads switched.",
                 self.preempts,
                 rundir.display()
@@ -615,7 +615,7 @@ impl Story {
             let l = &self.lines[i];
             writeln!(
                 w,
-                "stop at: event {} ({}{}{}); its record: patina log events {} --from {} --to {}",
+                "stop at: event {} ({}{}{}); its record: patina inspect events {} --from {} --to {}",
                 l.seq,
                 clean(&l.who),
                 if l.who.is_empty() { "" } else { " " },

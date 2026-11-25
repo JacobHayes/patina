@@ -96,16 +96,45 @@ fn main() -> ExitCode {
         }
         return ExitCode::SUCCESS;
     }
-    // Its words are the control call's, not options (`partition --from A --to B`).
+    // Its words are the control call's, not options (`partition --from A --to B`, `wait :7000`).
     if first == "ctl" && !rest.iter().any(|a| a == "--help" || a == "-h") {
         return ctl::main(rest);
     }
-    let Some(cmd) = cli::find_cmd(first) else {
-        eprintln!("patina: unknown command {first}\n");
-        eprint!("{}", cli::help_text(None));
-        return ExitCode::from(2);
+    let (cmd, cmd_args) = match cli::resolve(&args) {
+        cli::Resolved::Cmd(cmd, rest) => (cmd, rest),
+        cli::Resolved::GroupHelp {
+            group,
+            json,
+            exit_err,
+        } => {
+            if json {
+                println!("{}", cli::help_json());
+            } else if exit_err {
+                eprint!("{}", cli::group_help_text(group));
+            } else {
+                print!("{}", cli::group_help_text(group));
+            }
+            return if exit_err {
+                ExitCode::from(2)
+            } else {
+                ExitCode::SUCCESS
+            };
+        }
+        cli::Resolved::Unknown {
+            group: Some(group),
+            word,
+        } => {
+            eprintln!("patina {}: unknown subcommand {word}\n", group.name);
+            eprint!("{}", cli::group_help_text(group));
+            return ExitCode::from(2);
+        }
+        cli::Resolved::Unknown { group: None, word } => {
+            eprintln!("patina: unknown command {word}\n");
+            eprint!("{}", cli::help_text(None));
+            return ExitCode::from(2);
+        }
     };
-    let a = match cli::parse(cmd, rest) {
+    let a = match cli::parse(cmd, cmd_args) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("patina: {e}");
@@ -126,26 +155,33 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let r = match cmd {
-        Cmd::Run => run(&a),
-        Cmd::Verify => verify(&a),
-        Cmd::Replay => replay(&a),
-        Cmd::Explain => explain::main(&a),
-        Cmd::Debug => debug::main(&a),
-        Cmd::Log => log::main(&a).map_err(error),
-        Cmd::Doctor => doctor::doctor(&a).map_err(error),
-        Cmd::Sweep => sweep::main(&a),
-        Cmd::Batch => batch::main(&a),
-        Cmd::Report if a.has("--recheck") => recheck::main(&a),
-        Cmd::Report if a.has("--check") || a.has("--jobs") => Err(error(
-            "--check and -j judge runs again: give --recheck".into(),
-        )),
-        Cmd::Report => report::main(&a).map_err(error),
-        Cmd::Profile => guest_profile::main(&a).map_err(error),
-        Cmd::Minimize => minimize::main(&a),
-        Cmd::Ctl => Ok(ctl::main(&a.positional)),
-        Cmd::Wait => Ok(ready::wait(&a.positional)),
         Cmd::Guide => guide::main(&a).map_err(error),
-        Cmd::Skill => guide::skill(&a).map_err(error),
+        Cmd::GuideList => guide::list().map_err(error),
+        Cmd::GuideSkill => guide::skill(&a).map_err(error),
+        Cmd::Run => run(&a),
+        Cmd::Sweep => sweep::main(&a),
+        Cmd::InspectSummary => report::main(&a).map_err(error),
+        Cmd::InspectProfile => guest_profile::inspect_profile(&a).map_err(error),
+        Cmd::InspectServe => guest_profile::inspect_serve(&a).map_err(error),
+        Cmd::InspectHtml => guest_profile::inspect_html(&a).map_err(error),
+        Cmd::InspectStory => explain::main(&a),
+        Cmd::InspectTrace => guest_profile::inspect_trace(&a).map_err(error),
+        Cmd::InspectFolded => guest_profile::inspect_folded(&a).map_err(error),
+        Cmd::InspectEvents => log::events(&a).map_err(error),
+        Cmd::InspectTree => log::tree_cmd(&a).map_err(error),
+        Cmd::InspectDump => log::dump(&a).map_err(error),
+        Cmd::InspectDiff => log::diff(&a).map_err(error),
+        Cmd::InspectOps => log::ops(&a).map_err(error),
+        Cmd::InspectCheckOps => log::check_ops(&a).map_err(error),
+        Cmd::Replay => replay(&a),
+        Cmd::Minimize => minimize::main(&a),
+        Cmd::Debug => debug::main(&a),
+        Cmd::Recheck => recheck::main(&a),
+        Cmd::Doctor => doctor::doctor(&a).map_err(error),
+        Cmd::DoctorApparmor => doctor::apparmor().map_err(error),
+        Cmd::Batch => batch::main(&a),
+        Cmd::Verify => verify(&a),
+        Cmd::Ctl => Ok(ctl::main(&a.positional)),
     };
     r.unwrap_or_else(|Fail(o, e)| {
         // A full filesystem (ENOSPC, EDQUOT) is named, as the supervisor names it in a run.

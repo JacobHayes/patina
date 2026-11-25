@@ -66,7 +66,7 @@ fn sandbox_check() -> Result<String, (String, String)> {
 /// The command that installs the AppArmor profile for this executable.
 fn profile_fix() -> String {
     format!(
-        "{} doctor --print-apparmor-profile | sudo tee /etc/apparmor.d/patina >/dev/null \
+        "{} doctor apparmor | sudo tee /etc/apparmor.d/patina >/dev/null \
          && sudo apparmor_parser -r /etc/apparmor.d/patina",
         exe().display()
     )
@@ -85,7 +85,7 @@ pub fn namespace_fix() -> String {
         let host = if restricted {
             format!(
                 "; and on the host, which restricts user namespaces: an AppArmor profile for {} \
-                 (`patina doctor --print-apparmor-profile`, installed on the host), or \
+                 (`patina doctor apparmor`, installed on the host), or \
                  sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0",
                 exe().display()
             )
@@ -287,11 +287,12 @@ fn cpu() -> (String, String) {
     (field("vendor_id"), field("model name"))
 }
 
+pub fn apparmor() -> Res<ExitCode> {
+    print!("{}", crate::sandbox::apparmor_profile(&exe())?);
+    Ok(ExitCode::SUCCESS)
+}
+
 pub fn doctor(args: &Args) -> Res<ExitCode> {
-    if args.has("--print-apparmor-profile") {
-        print!("{}", crate::sandbox::apparmor_profile(&exe())?);
-        return Ok(ExitCode::SUCCESS);
-    }
     let facts = crate::host::Facts::probe(None);
     let (name, result) = crate::host::platform(&facts);
     let mut checks = vec![Check {

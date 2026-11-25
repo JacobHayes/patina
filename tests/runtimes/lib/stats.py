@@ -21,7 +21,7 @@ for run in sys.argv[2:]:
     deny = collections.Counter()
     incs = sorted(int(m.group(1)) for m in (re.match(r"boot-(\d+)$", d) for d in __import__("os").listdir(run)) if m)
     for k in incs:
-        p = subprocess.Popen([patina, "log", "dump", "%s/boot-%d/boundary.log" % (run, k)], stdout=subprocess.PIPE, text=True)
+        p = subprocess.Popen([patina, "inspect", "dump", "%s/boot-%d/boundary.log" % (run, k)], stdout=subprocess.PIPE, text=True)
         for line in p.stdout:
             m = line_re.match(line)
             if not m:

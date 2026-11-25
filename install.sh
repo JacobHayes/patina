@@ -128,11 +128,11 @@ esac
 restricted=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)
 exe=$(cd "$bin" && pwd -P)/patina
 if [ "$restricted" = 1 ] && [ -d /etc/apparmor.d ] \
-  && "$bin/patina" doctor --print-apparmor-profile >"$work/profile" \
+  && "$bin/patina" doctor apparmor >"$work/profile" \
   && ! cmp -s "$work/profile" /etc/apparmor.d/patina; then
   uid=$(id -u)
   if [ "$uid" = 0 ]; then sudo=; else sudo="sudo "; fi
-  fix="$exe doctor --print-apparmor-profile | ${sudo}tee /etc/apparmor.d/patina >/dev/null && ${sudo}apparmor_parser -r /etc/apparmor.d/patina"
+  fix="$exe doctor apparmor | ${sudo}tee /etc/apparmor.d/patina >/dev/null && ${sudo}apparmor_parser -r /etc/apparmor.d/patina"
   printf '\nThis host restricts unprivileged user namespaces (Ubuntu 24.04 and later). patina\n'
   printf 'makes its own sandbox, so it needs an AppArmor profile that admits %s,\n' "$exe"
   printf 'installed once as root:\n\n  %s\n\n' "$fix"

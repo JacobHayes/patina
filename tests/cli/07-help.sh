@@ -16,24 +16,33 @@ flags = {f["name"]: f for f in h["flags"]}
 assert h["commands"] and flags
 n = 0
 for c in h["commands"]:
-    text = subprocess.run([patina, c["name"], "--help"], capture_output=True, text=True, timeout=30)
+    path = c["path"]
+    text = subprocess.run([patina] + path + ["--help"], capture_output=True, text=True, timeout=30)
     assert text.returncode == 0, (c["name"], text.stderr)
     for name in c["flags"]:
         f = flags[name]
         assert c["name"] in f["commands"], (c["name"], name)
         assert name in text.stdout, (c["name"], name, "not in text help")
-        argv = [patina, c["name"], name] + value(f, c["name"]) + ["--help"]
+        argv = [patina] + path + [name] + value(f, c["name"]) + ["--help"]
         r = subprocess.run(argv, capture_output=True, text=True, timeout=30)
         assert r.returncode == 0, (argv, r.returncode, r.stderr)
         n += 1
-    unknown = [patina, c["name"], "--no-such-flag", "--help"]
+    unknown = [patina] + path + ["--no-such-flag", "--help"]
     r = subprocess.run(unknown, capture_output=True, text=True, timeout=30)
     assert r.returncode != 0 and "--no-such-flag" in r.stderr, (unknown, r.returncode, r.stderr)
     missing = [f for f in flags if f not in c["flags"]]
     for name in missing:
-        argv = [patina, c["name"], name] + value(flags[name], c["name"]) + ["--help"]
+        argv = [patina] + path + [name] + value(flags[name], c["name"]) + ["--help"]
         r = subprocess.run(argv, capture_output=True, text=True, timeout=30)
         assert r.returncode != 0, (argv, "accepted a flag the table does not list for it")
+for g in h.get("groups", []):
+    r = subprocess.run([patina, g["name"], "--help"], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, (g["name"], r.stderr)
+    for sub in g["subcommands"]:
+        assert sub in r.stdout, (g["name"], sub, "not in group help")
+    if g["require_sub"]:
+        bare = subprocess.run([patina, g["name"]], capture_output=True, text=True, timeout=30)
+        assert bare.returncode == 2, (g["name"], bare.returncode)
 print(f"{n} (command, flag) pairs parse; {len(h['commands'])} commands")
 PY
 # --fault help: every fault key, in place of a run (run --help leaves them out).

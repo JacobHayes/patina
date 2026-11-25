@@ -201,12 +201,12 @@ pub struct SweepHead {
 
 pub fn main(a: &Args) -> Res<ExitCode> {
     if a.positional.is_empty() {
-        return Err("usage: patina report DIR...".into());
+        return Err("usage: patina inspect summary DIR...".into());
     }
     let dirs: Vec<PathBuf> = a.positional.iter().map(PathBuf::from).collect();
     let runs = collect(&dirs)?;
     let known = known_flag(a)?;
-    let mut again = "patina report --group N".to_string();
+    let mut again = "patina inspect summary --group N".to_string();
     if let Some(k) = a.last("--known") {
         again.push_str(&format!(" --known {}", quote(k)));
     }
@@ -1722,7 +1722,7 @@ fn group_text(g: &Value, runs: u64, faulted: bool) -> String {
     s.push_str(&format!("  rerun:  {}\n", st("rerun")));
     s.push_str(&format!("  replay: {}\n", st("replay_command")));
     s.push_str(&format!(
-        "  explain: patina explain {}\n",
+        "  explain: patina inspect story {}\n",
         quote(g["first"]["dir"].as_str().unwrap_or(""))
     ));
     s
@@ -1781,7 +1781,7 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
                 .map(|w| format!(", lowered to {w} by a host limit"))
                 .unwrap_or_default()
         ),
-        None => format!("patina report: {what}\n"),
+        None => format!("patina inspect summary: {what}\n"),
     };
     if let Some(stop) = head.and_then(|h| h.stopped.as_ref()) {
         s.push_str(&format!("stopped early: {stop}\n"));
@@ -1842,7 +1842,7 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
         let checkers = c["checkers"].as_array().map_or(0, |k| k.len());
         if checkers > 1 {
             s.push_str(&format!(
-                "check: these verdicts are of {checkers} checkers (check.checkers in {}): patina report --recheck judges them again with one\n",
+                "check: these verdicts are of {checkers} checkers (check.checkers in {}): patina recheck judges them again with one\n",
                 if head.is_some() { "report.json" } else { "--format json" }
             ));
         }

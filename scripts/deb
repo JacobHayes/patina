@@ -20,7 +20,7 @@ mkdir -p "$pkg/DEBIAN" "$pkg/usr/bin" "$pkg/etc/apparmor.d" "$pkg/usr/share/doc/
 install -m 755 "$bin" "$pkg/usr/bin/patina"
 # The profile the binary prints for itself, for the path it is installed at.
 here=$(realpath "$pkg/usr/bin/patina")
-"$pkg/usr/bin/patina" doctor --print-apparmor-profile >"$stage/profile"
+"$pkg/usr/bin/patina" doctor apparmor >"$stage/profile"
 grep -qF "\"$here\"" "$stage/profile" || { echo "deb: the profile does not name $here" >&2; exit 1; }
 awk -v from="$here" -v to=/usr/bin/patina '{ o = ""; while ((i = index($0, from))) { o = o substr($0, 1, i - 1) to; $0 = substr($0, i + length(from)) } print o $0 }' \
   "$stage/profile" >"$pkg/etc/apparmor.d/patina"

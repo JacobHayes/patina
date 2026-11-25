@@ -5,7 +5,7 @@
 #      just those cases under the same ids; the report's rerun line runs.
 #    - Keyed findings (LABEL [KEY]: detail) group by the key; reasons not to judge count by
 #      their class (CLASS: detail).
-#    - `patina report --recheck` after an edit of the checker's table judges the kept runs
+#    - `patina recheck` after an edit of the checker's table judges the kept runs
 #      again: the verdicts follow the table, and the runs' digests, logs and own outcomes are
 #      untouched; the same checker again rewrites nothing. A run whose logs are gone is not
 #      judged again: the report names two checkers.
@@ -80,7 +80,7 @@ for r in sh/seed-*/*; do own "$r" >"own/$(echo "$r" | tr / _)"; done
 [ -f sh/seed-1/4-a_tb/replay.json ] || die "the finding's first seed was not replayed"
 echo 4 >chk/expected.txt
 rc=0
-"$PATINA" report --recheck sh >rk.txt 2>rk.err || rc=$?
+"$PATINA" recheck sh >rk.txt 2>rk.err || rc=$?
 [ "$rc" = 0 ] && [ "$(jq '.groups | length' sh/report.json)" = 0 ] || die "recheck after the table edit: exit $rc: $(cat rk.txt rk.err)"
 [ "$(jq -c '.check.not_judged' sh/report.json)" = '{"expected":2}' ] || die "not judged by class: $(jq -c .check sh/report.json)"
 # The checker's file is unchanged but its verdict is not: the replay of the old one goes.
@@ -90,17 +90,17 @@ for r in sh/seed-*/*; do
     [ "$now" = "$was" ] || die "recheck changed more than the check of $r"
     cp "$r/result.json" "own/$(echo "$r" | tr / _).result"
 done
-"$PATINA" report --recheck sh >/dev/null 2>&1 || die "recheck again: exit $?"
+"$PATINA" recheck sh >/dev/null 2>&1 || die "recheck again: exit $?"
 for r in sh/seed-*/*; do
     cmp -s "own/$(echo "$r" | tr / _).result" "$r/result.json" || die "the same checker again rewrote $r/result.json"
 done
 echo "recheck: the table's entry turns 2 findings into $(jq -c .check.not_judged sh/report.json); digests, logs and own outcomes unchanged"
 
 # A checker that serves (same-output.py) judges as one run per run does.
-"$PATINA" report --recheck --check "$root/examples/checks/same-output ref" sh >/dev/null 2>&1 || true
+"$PATINA" recheck --check "$root/examples/checks/same-output ref" sh >/dev/null 2>&1 || true
 verdicts() { for r in sh/seed-*/*; do jq -r '"\(.check.verdict) \(.check.label)"' "$r/result.json"; done | paste -sd,; }
 by_run=$(verdicts)
-"$PATINA" report --recheck --check "$root/examples/checks/same-output.py ref" sh >/dev/null 2>&1 || true
+"$PATINA" recheck --check "$root/examples/checks/same-output.py ref" sh >/dev/null 2>&1 || true
 [ "$(verdicts)" = "$by_run" ] || die "a serving recheck: $(verdicts); per run: $by_run"
 
 # Pruned runs: a recheck names them and leaves them; the report says two checkers judged.
@@ -112,7 +112,7 @@ mv chk/expected.off chk/expected.txt
 [ "$rc" = 1 ] || die "the sweep with a checker: exit $rc: $(tail -3 shf.txt)"
 rm -rf shf/seed-1/3-plain/boot-1 shf/seed-1/3-plain/check.out
 rc=0
-"$PATINA" report --recheck --check "$root/examples/checks/same-output ref" --format json shf >shf.json 2>shf.err || rc=$?
+"$PATINA" recheck --check "$root/examples/checks/same-output ref" --format json shf >shf.json 2>shf.err || rc=$?
 [ "$rc" = 1 ] && [ "$(jq '.check.checkers | length' shf.json)" = 2 ] || die "recheck of pruned runs: exit $rc: $(jq -c .check shf.json) $(cat shf.err)"
 [ "$(jq -r 'select(.config.check.program | endswith("chk/diff")) | input_filename' shf/seed-*/*/run.json | wc -l)" -gt 0 ] ||
     die "a pruned run was judged again"
@@ -121,14 +121,14 @@ rc=0
 echo 'echo boom-17 >&2; exit 3' >fails.txt
 rc=$(PATINA_TEST_KEEP_NONE=1 sweep none --cases fails.txt --check "chk/diff ref" -- /bin/bash -c {})
 before=$(jq -r .signature none/seed-1/1-3/result.json)
-"$PATINA" report --recheck none >/dev/null 2>&1 || true
+"$PATINA" recheck none >/dev/null 2>&1 || true
 [ "$rc" = 1 ] && [ "$(jq -r .signature none/seed-1/1-3/result.json)" = "$before" ] ||
     die "a pruned failure's signature: exit $rc, $before, now $(jq -r .signature none/seed-1/1-3/result.json)"
 
 # Resuming with the checker's file changed: judged again from the kept logs, none run again;
 # and a verdict left pending is judged.
 for r in sh/seed-*/*; do : >"$r/kept"; done
-"$PATINA" report --recheck --check "chk/diff ref" sh >/dev/null 2>&1 || true
+"$PATINA" recheck --check "chk/diff ref" sh >/dev/null 2>&1 || true
 echo '# changed' >>chk/diff
 rc=$(sweep sh --cases cases.txt --check "chk/diff ref" -- /bin/bash -c {})
 [ "$rc" = 0 ] || die "the resumed sweep: exit $rc: $(tail -3 sh.txt)"

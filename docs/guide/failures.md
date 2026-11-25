@@ -5,7 +5,7 @@ classes in every failing run, and its run directory. Then, on that directory:
 
 | Command | What it gives |
 |---|---|
-| `patina explain RUNDIR` | the run as a short story, and the event to stop at |
+| `patina inspect story RUNDIR` | the run as a short story, and the event to stop at |
 | `patina minimize RUNDIR` | the fewest fault settings that still fail the same way, and their command |
 | `patina debug RUNDIR` | the run replayed and stopped under gdb just before that event |
 | `patina replay RUNDIR` | the run again, every system call compared with the recorded one |
@@ -29,17 +29,17 @@ last injected:
   seq 124 t=100000ms crash kind=machine point=91 object=/work/acks.log lost: 0 missing, 2 changed, 0 back
 run directory: /tmp/acklog/patina-out/run-3
 replay: patina replay /tmp/acklog/patina-out/run-3
-explain: patina explain /tmp/acklog/patina-out/run-3
+explain: patina inspect story /tmp/acklog/patina-out/run-3
 ```
 
-## The story: `patina explain`
+## The story: `patina inspect story`
 
 <!-- transcript explain
 dir: /tmp/acklog
 exact-only: the run of seed 3 above
 -->
 ```text
-$ patina explain patina-out/run-3
+$ patina inspect story patina-out/run-3
 violation (always): acked-records-kept: 21 acknowledged, 0 stored
 seed 3: 283 events, 30 story lines; showing all 11
 data: the first 128 bytes of each read, write, send and receive, from a replay identical to the run (patina-out/run-3/explain)
@@ -55,14 +55,14 @@ data: the first 128 bytes of each read, write, send and receive, from a replay i
      124  +      0.120 ms        the machine starts again (boot 2)
      181  +  14761.109 ms  main  disk: fsync the directory /work
      211  +  14761.135 ms  main  assert acked-records-kept
-stop at: event 211 (main assert acked-records-kept); its record: patina log events patina-out/run-3 --from 211 --to 211
+stop at: event 211 (main assert acked-records-kept); its record: patina inspect events patina-out/run-3 --from 211 --to 211
 ```
 
 Each line is an event number, virtual time since the start, who (a thread, `main`, `t1`, ...;
 a machine's name with machines) and what: messages with the bytes sent, disk changes, faults,
 crashes, output, the end. Repeats are folded. `--full` prints every line; `--from SEQ --to SEQ`
 picks a window. A race in the program's own memory leaves no trace in the log: the story then
-says the threads were switched in computation, and `patina log events RUNDIR --types
+says the threads were switched in computation, and `patina inspect events RUNDIR --types
 preempt,call` lists where.
 
 ## Stopping the world: `patina debug`
@@ -126,15 +126,15 @@ $ jq '{outcome, stop, message, boots}' patina-out/run-3/result.json
 }
 ```
 
-The logs, read by `patina log`:
+The logs, read by `patina inspect`:
 
-- `patina log ops RUNDIR/boot-1`: every change to `/work`, in order;
-- `patina log tree RUNDIR/boot-1 DIR`: the disk that boot ended with, written to DIR
+- `patina inspect ops RUNDIR/boot-1`: every change to `/work`, in order (`patina inspect check-ops RUNDIR` replays the op log and checks it matches the disk tree);
+- `patina inspect tree RUNDIR/boot-1 DIR`: the disk that boot ended with, written to DIR
   (`--post-crash`: the one its crash left);
-- `patina log events RUNDIR`: the whole run as JSON lines for `jq` or a checker: system calls
+- `patina inspect events RUNDIR`: the whole run as JSON lines for `jq` or a checker: system calls
   with their paths, file operations, faults, crashes, marks, machine and network events (`--types
   op,crash` keeps those; every line has `type`, `seq` and `t`, virtual nanoseconds);
-- `patina log dump LOG --from SEQ --to SEQ` and `patina log diff LOG LOG`: the raw boundary log,
+- `patina inspect dump LOG --from SEQ --to SEQ` and `patina inspect diff LOG LOG`: the raw boundary log,
   and the first record where two differ.
 
 <!-- transcript events
@@ -142,7 +142,7 @@ dir: /tmp/acklog
 exact-only: the run of seed 3 above
 -->
 ```text
-$ patina log events patina-out/run-3 --types crash
+$ patina inspect events patina-out/run-3 --types crash
 {"type":"header","v":1,"seed":3,"disk":"/work","boots":2}
 {"type":"crash","boot":1,"seq":124,"t":100000120163,"slot":0,"kind":"machine","point":91,"lost":{"back":0,"changed":2,"missing":0,"paths":["/work/acks.log","/work/data.log"]}}
 ```

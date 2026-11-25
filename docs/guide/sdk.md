@@ -54,7 +54,7 @@ if patina_dst::buggify!("batch-commit") && !ledger.is_empty() { /* the rare path
 - **`knob`** is a seed-chosen value in `lo..hi` under `--faults buggify` (`d` otherwise);
   **`delay`** sleeps a seed-chosen virtual time on drawn evaluations.
 - **`mark`** records a label in the run's log, in clear (`mark("ack 17")`): a checker reads it
-  from `patina log events` to check a promise was backed (`patina guide checks`).
+  from `patina inspect events` to check a promise was backed (`patina guide checks`).
 - **`control`** is a control call, as `patina ctl` (`patina guide machines`). `control("settle")`
   ends the seed's faults and returns once every machine has recovered (`patina guide faults`); a
   signal that interrupts its wait is handled and the wait goes on.

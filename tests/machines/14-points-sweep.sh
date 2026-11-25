@@ -18,9 +18,9 @@
 o=$RUNS/14-points-sweep; mkdir -p "$o"
 for v in ok early; do
     rm -f "$o/$v.toml"
-    conf "$o/$v.toml" a python3 /guest/ack2.py a; printf 'ready = "patina wait :7000"\n' >> "$o/$v.toml"
+    conf "$o/$v.toml" a python3 /guest/ack2.py a; printf 'ready = "patina ctl wait :7000"\n' >> "$o/$v.toml"
     if [ $v = ok ]; then conf "$o/$v.toml" b python3 /guest/ack2.py b; else conf "$o/$v.toml" b python3 /guest/ack2.py b early; fi
-    printf 'ready = "patina wait :7000"\n' >> "$o/$v.toml"
+    printf 'ready = "patina ctl wait :7000"\n' >> "$o/$v.toml"
     main_unfaulted "$o/$v.toml"
 done
 D="python3 /guest/ack2.py main 4"
@@ -55,7 +55,7 @@ for t in $(seq "$s0" $((s0 + 9))); do
 done
 [ -n "$s" ] || die "seeds $s0..$((s0 + 9)): no machine crashed at a point"
 verify_ok "$o/verify" "$s" 3 $P -- $D
-"$PATINA" log ops --check "$o/p" >"$o/check.txt" || die "log ops --check: $(cat "$o/check.txt")"
+"$PATINA" inspect check-ops "$o/p" >"$o/check.txt" || die "log ops --check: $(cat "$o/check.txt")"
 for n in a b; do grep -q "/machine/$n/boot-1: ok " "$o/check.txt" || die "log ops --check: no disk of $n: $(cat "$o/check.txt")"; done
 st=0; timeout 300 "$PATINA" replay "$o/p" >"$o/replay.txt" 2>&1 || st=$?
 grep -q '^identical' "$o/replay.txt" || die "replay: exit $st: $(head -3 "$o/replay.txt")"
@@ -98,16 +98,16 @@ PY
 # boots crashes b twice, whatever the seed and host: first at that directory sync (harmless),
 # then at the create of `log` for put 1, which a has acknowledged.
 o2=$o/later; mkdir -p "$o2"; rm -f "$o2/c.toml"
-conf "$o2/c.toml" a python3 /guest/ack2.py a; printf 'ready = "patina wait :7000"\n' >> "$o2/c.toml"
+conf "$o2/c.toml" a python3 /guest/ack2.py a; printf 'ready = "patina ctl wait :7000"\n' >> "$o2/c.toml"
 conf "$o2/c.toml" b python3 /guest/ack2.py b lazy init
-printf 'max-boots = 3\nready = "patina wait :7000"\n' >>"$o2/c.toml"
+printf 'max-boots = 3\nready = "patina ctl wait :7000"\n' >>"$o2/c.toml"
 s=$((RANDOM % 1000 + 1))
 [ "$(run "$o2/l" $s --config "$o2/c.toml" --fault crash-permille=1000@b -- python3 /guest/ack2.py main 2 wait)" = failure ] \
     || die "seed $s: the built run did not fail: $(field "$o2/l/result.json" message)"
 st=0; timeout 300 "$PATINA" minimize "$o2/l" --format json >"$o2/l.json" 2>"$o2/l.err" || st=$?
 [ "$st" = 0 ] || die "minimize seed $s: exit $st: $(tail -3 "$o2/l.err")"
-"$PATINA" log events "$o2/l" --types op,crash >"$o2/l.ev" || die "log events $o2/l"
-"$PATINA" log events "$o2/l/minimized" --types op,crash >"$o2/m.ev" || die "log events $o2/l/minimized"
+"$PATINA" inspect events "$o2/l" --types op,crash >"$o2/l.ev" || die "log events $o2/l"
+"$PATINA" inspect events "$o2/l/minimized" --types op,crash >"$o2/m.ev" || die "log events $o2/l/minimized"
 python3 -I - "$o2/l" "$o2/l.json" "$o2/l.ev" "$o2/m.ev" <<'PY' || die "seed $s: minimize of a failure needing b's later crash"
 import json, os, re, sys
 d, m = sys.argv[1], json.load(open(sys.argv[2]))
@@ -141,8 +141,8 @@ print("minimize: b's later crash alone: %s (b's first crash alone, at point %d, 
 PY
 # faults = false: an unscoped crash leaves the machine out.
 rm -f "$o/free.toml"
-conf "$o/free.toml" a python3 /guest/ack2.py a; printf 'ready = "patina wait :7000"\n' >> "$o/free.toml"
-conf "$o/free.toml" b python3 /guest/ack2.py b; printf 'faults = false\nready = "patina wait :7000"\n' >>"$o/free.toml"; main_unfaulted "$o/free.toml"
+conf "$o/free.toml" a python3 /guest/ack2.py a; printf 'ready = "patina ctl wait :7000"\n' >> "$o/free.toml"
+conf "$o/free.toml" b python3 /guest/ack2.py b; printf 'faults = false\nready = "patina ctl wait :7000"\n' >>"$o/free.toml"; main_unfaulted "$o/free.toml"
 run_ok "$o/free" 1 --config "$o/free.toml" --fault crash-permille=300 -- $D
 python3 -I - "$o/free/result.json" <<'PY' || die "faults = false"
 import json, sys

@@ -5,7 +5,7 @@ D: `patina verify --runs COSTS_D_RUNS --vary cpu,load,aslr,sandbox` identical fo
    (defaults 20 and 5), faults off and with the workload's fault configuration
    (tests/durability/bench/workloads.py); and seeds 1-10, one run each, faults off: number of distinct
    digests (>= 3 required for concurrent workloads).
-Self-check: `patina log ops --check` on seed 1 faults off and on (every boot).
+Self-check: `patina inspect check-ops` on seed 1 faults off and on (every boot).
 F: the workload's fault scenario is checked by its own task's area scripts (named per workload
    in the table; ./check TNN).
 Usage: matrix.py OUTDIR [W...]. Writes OUTDIR/matrix.tsv and prints the table.
@@ -65,7 +65,7 @@ for w in only:
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1800)
     sc_ok = True
     for d in (rd, fd):
-        c = subprocess.run([PATINA, "log", "ops", "--check", d], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=1800)
+        c = subprocess.run([PATINA, "inspect", "check-ops", d], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=1800)
         with open(d + ".oplog-check.txt", "w") as fh:
             fh.write(c.stdout)
         sc_ok &= c.returncode == 0

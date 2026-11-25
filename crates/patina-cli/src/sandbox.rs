@@ -1734,7 +1734,7 @@ pub fn apparmor_profile(exe: &Path) -> Res<String> {
     }
     Ok(format!(
         "# Lets the patina executable below create the user namespace its sandbox needs where\n\
-         # kernel.apparmor_restrict_unprivileged_userns=1 (`patina doctor --print-apparmor-profile`).\n\
+         # kernel.apparmor_restrict_unprivileged_userns=1 (`patina doctor apparmor`).\n\
          abi <abi/4.0>,\n\
          include <tunables/global>\n\
          \n\

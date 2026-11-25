@@ -5,21 +5,21 @@ performance counters (`perf_event_open` is not needed, so profiling works inside
 containers). Every profile metric is derived either offline from a run directory or from
 deterministic opt-in sidecars that never change the boundary log or the schedule.
 
-## Profiling any existing run (`patina profile`)
+## Profiling any existing run (`patina inspect profile`)
 
 Any run directory already records syscalls, virtual timestamps, blocking waits, memory mappings,
-and injected faults in `boundary.log`. Run `patina profile RUNDIR` after the fact with zero
+and injected faults in `boundary.log`. Run `patina inspect profile RUNDIR` after the fact with zero
 overhead during the run:
 
 <!-- no-run profile-formats: example invocations against an existing run directory -->
 ```sh
-patina profile patina-out/run-1
-patina profile patina-out/run-1 --format json
-patina profile patina-out/run-1 --format trace --out trace.json
-patina profile patina-out/run-1 --format html --out report.html
+patina inspect profile patina-out/run-1
+patina inspect profile patina-out/run-1 --format json
+patina inspect trace --out trace.json patina-out/run-1
+patina inspect html --out report.html patina-out/run-1
 ```
 
-`patina profile` attributes every run into four decoupled buckets so slow runtime intercepts
+`patina inspect profile` attributes every run into four decoupled buckets so slow runtime intercepts
 never masquerade as slow guest code:
 
 | Bucket | What it measures |
@@ -34,25 +34,25 @@ reporting peak mapped bytes, allocation counts, and top allocations.
 
 ### Formats and local dashboard server
 
-| Command / Option | Output |
+| Command | Output |
 |---|---|
-| `patina profile PATH --format summary` | Human-readable four-bucket report, top syscalls, memory peak, tail latencies, and top CPU functions |
-| `patina profile PATH --format json` | Structured machine-readable profile JSON |
-| `patina profile PATH --format trace` | Perfetto / Chrome Trace Event JSON (`traceEvents` with virtual microsecond timestamps, thread lanes, faults, and a `guest_memory_bytes` counter track) |
-| `patina profile PATH --format folded` | Standard collapsed stack lines (`main;parse;hash 4200`) for flamegraph tools |
-| `patina profile PATH --format html` | Self-contained, zero-CDN interactive HTML dashboard (virtual-time swimlane canvas, click-to-zoom CPU flamegraph, memory chart, tail-latency chart, coverage summary, and embedded JSON/trace download buttons) |
-| `--out FILE` | Write the chosen format to `FILE` instead of stdout |
-| `--serve` | Serve the interactive HTML dashboard locally (default `127.0.0.1:8080`, or `--serve=0.0.0.0:9090`), exposing `/`, `/profile.json`, and `/trace.json` |
+| `patina inspect profile PATH --format text` | Human-readable four-bucket report (the default), top syscalls, memory peak, tail latencies, and top CPU functions |
+| `patina inspect profile PATH --format json` | Structured machine-readable profile JSON |
+| `patina inspect trace RUNDIR --out FILE` | Perfetto / Chrome Trace Event JSON (`traceEvents` with virtual microsecond timestamps, thread lanes, faults, and a `guest_memory_bytes` counter track) |
+| `patina inspect folded RUNDIR --out FILE` | Standard collapsed stack lines (`main;parse;hash 4200`) for flamegraph tools |
+| `patina inspect html PATH --out FILE` | Self-contained, zero-CDN interactive HTML dashboard (virtual-time swimlane canvas, click-to-zoom CPU flamegraph, memory chart, tail-latency chart, coverage summary, and embedded JSON/trace download buttons) |
+| `patina inspect serve PATH --addr ADDR` | Serve the interactive HTML dashboard locally (default `127.0.0.1:8080`, or `--addr 0.0.0.0:9090`), exposing `/`, `/profile.json`, and `/trace.json` |
 
 ### Profiling a sweep or campaign directory
 
-Point `patina profile` at a sweep directory (a directory containing `report.json` or run
-subdirectories) to inspect the whole campaign:
+Point `patina inspect html` or `patina inspect serve` (or `patina inspect profile`) at a sweep
+directory (a directory containing `report.json` or run subdirectories) to inspect the whole
+campaign:
 
 <!-- no-run profile-sweep: example sweep dashboard and local server commands -->
 ```sh
-patina profile patina-out/sweep --format html --out sweep.html
-patina profile patina-out/sweep --serve
+patina inspect html --out sweep.html patina-out/sweep
+patina inspect serve patina-out/sweep
 ```
 
 The sweep dashboard shows the outcome breakdown, grouped findings with copyable `patina replay`
@@ -67,8 +67,8 @@ Pass `--profile-cpu` (default interval: every 1000 compute events) or `--profile
 <!-- no-run profile-cpu: example CPU flamegraph capture against a user program -->
 ```sh
 patina run --seed 7 --profile-cpu=200 -- ./app
-patina profile patina-out/run-7 --format folded > stacks.folded
-patina profile patina-out/run-7 --format html --out profile.html
+patina inspect folded patina-out/run-7 > stacks.folded
+patina inspect html --out profile.html patina-out/run-7
 ```
 
 At every N-th deterministic compute point, the runtime walks the guest frame-pointer chain
@@ -76,11 +76,11 @@ At every N-th deterministic compute point, the runtime walks the guest frame-poi
 filters out any address inside `patina-rt`, and appends raw stack samples and mapped image load
 biases to `boot-K/cpu_profile.bin`.
 
-- Same seed gives bit-for-bit identical `cpu_profile.bin` and `patina profile RUNDIR --format folded` output across runs.
+- Same seed gives bit-for-bit identical `cpu_profile.bin` and `patina inspect folded RUNDIR` output across runs.
 - `boundary.log` and the run digest are completely unchanged: you can enable `--profile-cpu` on
   `patina replay RUNDIR --profile-cpu=200` to capture a CPU flamegraph of an existing run without
   re-searching for the seed.
-- `patina profile` resolves guest addresses offline against `.symtab` and `.dynsym` of the mapped
+- `patina inspect profile` resolves guest addresses offline against `.symtab` and `.dynsym` of the mapped
   ELF binaries.
 
 ## Black-box ELF-rewriter edge coverage (`--coverage`)

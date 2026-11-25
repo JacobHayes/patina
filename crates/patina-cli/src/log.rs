@@ -522,70 +522,72 @@ fn tree(bdir: &Path, dir: &Path, post: bool) -> Res<()> {
     }
 }
 
-pub fn main(args: &Args) -> Res<ExitCode> {
-    let p = &args.positional;
-    let arg = |i: usize, usage: &str| -> Res<&str> {
-        p.get(i)
-            .map(|s| s.as_str())
-            .ok_or_else(|| usage.to_string())
+pub fn dump(args: &Args) -> Res<ExitCode> {
+    let [path] = args.positional.as_slice() else {
+        return Err("usage: patina inspect dump LOG [--from SEQ] [--to SEQ]".into());
     };
-    match p.first().map(|s| s.as_str()) {
-        Some("dump") => {
-            let path = arg(1, "log dump LOG [--from SEQ] [--to SEQ]")?;
-            let from = args.num::<u64>("--from")?.unwrap_or(0);
-            let to = args.num::<u64>("--to")?.unwrap_or(u64::MAX);
-            let mut machines = Machines::of_log(Path::new(path));
-            for r in load(path)?.iter() {
-                let machine = machines.as_mut().map(|n| n.see(r)).unwrap_or_default();
-                if r.seq >= from && r.seq <= to {
-                    println!("{}{machine}", describe(r));
-                }
-            }
-            Ok(ExitCode::SUCCESS)
+    let from = args.num::<u64>("--from")?.unwrap_or(0);
+    let to = args.num::<u64>("--to")?.unwrap_or(u64::MAX);
+    let mut machines = Machines::of_log(Path::new(path));
+    for r in load(path)?.iter() {
+        let machine = machines.as_mut().map(|n| n.see(r)).unwrap_or_default();
+        if r.seq >= from && r.seq <= to {
+            println!("{}{machine}", describe(r));
         }
-        Some("diff") => {
-            let (a, b) = (arg(1, "log diff LOG LOG")?, arg(2, "log diff LOG LOG")?);
-            Ok(if print_difference(a, b)? {
-                ExitCode::from(1)
-            } else {
-                ExitCode::SUCCESS
-            })
-        }
-        Some("ops") => {
-            let dir = Path::new(arg(1, "log ops BOOTDIR | log ops --check RUNDIR")?);
-            if args.has("--check") {
-                crate::durability::check::check(dir)?;
-            } else {
-                crate::durability::log::dump(dir)?;
-            }
-            Ok(ExitCode::SUCCESS)
-        }
-        Some("tree") => {
-            let usage = "log tree BOOTDIR DIR [--post-crash]";
-            tree(
-                Path::new(arg(1, usage)?),
-                Path::new(arg(2, usage)?),
-                args.has("--post-crash"),
-            )?;
-            Ok(ExitCode::SUCCESS)
-        }
-        Some("events") => {
-            let run = Path::new(arg(1, "log events RUNDIR [--types T,T] [--from SEQ] [--to SEQ]")?);
-            let sel = crate::events::Select::parse(
-                args.last("--types"),
-                args.num::<u64>("--from")?.unwrap_or(0),
-                args.num::<u64>("--to")?.unwrap_or(u64::MAX),
-            )?;
-            match crate::events::export(run, &sel, std::io::stdout().lock()) {
-                // A reader that stopped early (`| head`) is not an error.
-                Err(e) if e.contains("Broken pipe") => Ok(ExitCode::SUCCESS),
-                r => r.map(|()| ExitCode::SUCCESS),
-            }
-        }
-        _ => Err(
-            "log dump LOG | log diff LOG LOG | log ops BOOTDIR | log ops --check RUNDIR | log tree BOOTDIR DIR [--post-crash] | log events RUNDIR"
-                .into(),
-        ),
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+pub fn diff(args: &Args) -> Res<ExitCode> {
+    let [a, b] = args.positional.as_slice() else {
+        return Err("usage: patina inspect diff LOG LOG".into());
+    };
+    Ok(if print_difference(a, b)? {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
+pub fn ops(args: &Args) -> Res<ExitCode> {
+    let [dir] = args.positional.as_slice() else {
+        return Err("usage: patina inspect ops BOOTDIR".into());
+    };
+    crate::durability::log::dump(Path::new(dir))?;
+    Ok(ExitCode::SUCCESS)
+}
+
+pub fn check_ops(args: &Args) -> Res<ExitCode> {
+    let [dir] = args.positional.as_slice() else {
+        return Err("usage: patina inspect check-ops RUNDIR".into());
+    };
+    crate::durability::check::check(Path::new(dir))?;
+    Ok(ExitCode::SUCCESS)
+}
+
+pub fn tree_cmd(args: &Args) -> Res<ExitCode> {
+    let [boot, dir] = args.positional.as_slice() else {
+        return Err("usage: patina inspect tree BOOTDIR DIR [--post-crash]".into());
+    };
+    tree(Path::new(boot), Path::new(dir), args.has("--post-crash"))?;
+    Ok(ExitCode::SUCCESS)
+}
+
+pub fn events(args: &Args) -> Res<ExitCode> {
+    let [run] = args.positional.as_slice() else {
+        return Err(
+            "usage: patina inspect events RUNDIR [--types T,T] [--from SEQ] [--to SEQ]".into(),
+        );
+    };
+    let sel = crate::events::Select::parse(
+        args.last("--types"),
+        args.num::<u64>("--from")?.unwrap_or(0),
+        args.num::<u64>("--to")?.unwrap_or(u64::MAX),
+    )?;
+    match crate::events::export(Path::new(run), &sel, std::io::stdout().lock()) {
+        // A reader that stopped early (`| head`) is not an error.
+        Err(e) if e.contains("Broken pipe") => Ok(ExitCode::SUCCESS),
+        r => r.map(|()| ExitCode::SUCCESS),
     }
 }
 

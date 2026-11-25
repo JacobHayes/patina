@@ -28,7 +28,7 @@ for n in a b; do
         || die "machine $n: realtime - monotonic $g against main's $d, skew $s ms, mtime - realtime $m"
     echo "machine $n: skew $s ms: realtime - monotonic $g s (main $d s), its file's mtime agrees with its clock"
 done
-n=$("$PATINA" log events "$r" --types machine | grep -c '"event":"clock".*"by":"seed"')
+n=$("$PATINA" inspect events "$r" --types machine | grep -c '"event":"clock".*"by":"seed"')
 [ "$n" = 2 ] || die "clock events: $n"
 
 # The steps.

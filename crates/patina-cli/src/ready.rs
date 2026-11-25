@@ -62,11 +62,11 @@ pub fn runner(args: &[String]) -> ExitCode {
     }
 }
 
-/// `patina wait ADDR`: one TCP connect to `ADDR` (`:PORT` is this machine's `127.0.0.1:PORT`);
+/// `patina ctl wait ADDR`: one TCP connect to `ADDR` (`:PORT` is this machine's `127.0.0.1:PORT`);
 /// exit 0 when it succeeds, 1 with why when it does not.
 pub fn wait(args: &[String]) -> ExitCode {
     let [addr] = args else {
-        eprintln!("patina wait: expected one ADDR (HOST:PORT or :PORT)");
+        eprintln!("patina ctl wait: expected one ADDR (HOST:PORT or :PORT)");
         return ExitCode::from(2);
     };
     let target = match addr.strip_prefix(':') {
@@ -76,7 +76,7 @@ pub fn wait(args: &[String]) -> ExitCode {
     match std::net::TcpStream::connect(&target) {
         Ok(_) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("patina wait: connect {target}: {e}");
+            eprintln!("patina ctl wait: connect {target}: {e}");
             ExitCode::from(1)
         }
     }

@@ -155,7 +155,7 @@ fn profiling_suite_end_to_end() {
     let guest_s = guest.to_str().unwrap();
 
     // ------------------------------------------------------------------------
-    // 1. Baseline run (no profiling / coverage flags) + offline `patina profile`
+    // 1. Baseline run (no profiling / coverage flags) + offline `patina inspect`
     // ------------------------------------------------------------------------
     let base_dir = root.join("run-base");
     let base_s = base_dir.to_str().unwrap();
@@ -182,10 +182,10 @@ fn profiling_suite_end_to_end() {
     let base_log = std::fs::read(base_dir.join("boot-1/boundary.log")).unwrap();
 
     // Summary format
-    let sum = run_patina(&["profile", base_s]);
+    let sum = run_patina(&["inspect", "profile", base_s]);
     assert!(
         sum.status.success(),
-        "profile summary failed: {}",
+        "inspect profile failed: {}",
         String::from_utf8_lossy(&sum.stderr)
     );
     let sum_txt = String::from_utf8_lossy(&sum.stdout);
@@ -195,7 +195,7 @@ fn profiling_suite_end_to_end() {
     assert!(sum_txt.contains("4. Patina Runtime Tax"));
 
     // JSON format: 4 buckets, memory peak, virtual latency percentiles
-    let pj = run_patina(&["profile", base_s, "--format", "json"]);
+    let pj = run_patina(&["inspect", "profile", base_s, "--format", "json"]);
     assert!(pj.status.success());
     let prof: Value = serde_json::from_slice(&pj.stdout).expect("profile json");
     assert!(prof["logical_io"]["write_bytes"].as_u64().unwrap() >= 6 * 1024);
@@ -220,7 +220,7 @@ fn profiling_suite_end_to_end() {
     );
 
     // Perfetto / Chrome Trace Event JSON
-    let pt = run_patina(&["profile", base_s, "--format", "trace"]);
+    let pt = run_patina(&["inspect", "trace", base_s]);
     assert!(pt.status.success());
     let trace: Value = serde_json::from_slice(&pt.stdout).expect("trace json");
     let events = trace["traceEvents"].as_array().expect("traceEvents array");
@@ -236,10 +236,9 @@ fn profiling_suite_end_to_end() {
     // Self-contained zero-CDN HTML
     let html_path = root.join("run.html");
     let ph = run_patina(&[
-        "profile",
-        base_s,
-        "--format",
+        "inspect",
         "html",
+        base_s,
         "--out",
         html_path.to_str().unwrap(),
     ]);
@@ -298,8 +297,8 @@ fn profiling_suite_end_to_end() {
     );
 
     // Folded flamegraph MUST be bit-for-bit identical, symbolized, and free of patina-rt frames
-    let f1 = run_patina(&["profile", cpu1.to_str().unwrap(), "--format", "folded"]);
-    let f2 = run_patina(&["profile", cpu2.to_str().unwrap(), "--format", "folded"]);
+    let f1 = run_patina(&["inspect", "folded", cpu1.to_str().unwrap()]);
+    let f2 = run_patina(&["inspect", "folded", cpu2.to_str().unwrap()]);
     assert!(f1.status.success() && f2.status.success());
     assert_eq!(
         f1.stdout, f2.stdout,
@@ -425,16 +424,15 @@ fn profiling_suite_end_to_end() {
     );
     let sw_html_path = root.join("sweep.html");
     let swh = run_patina(&[
-        "profile",
-        sweep_dir.to_str().unwrap(),
-        "--format",
+        "inspect",
         "html",
+        sweep_dir.to_str().unwrap(),
         "--out",
         sw_html_path.to_str().unwrap(),
     ]);
     assert!(
         swh.status.success(),
-        "sweep profile html failed: {}",
+        "sweep inspect html failed: {}",
         String::from_utf8_lossy(&swh.stderr)
     );
     let sw_html = std::fs::read_to_string(&sw_html_path).unwrap();
@@ -442,18 +440,19 @@ fn profiling_suite_end_to_end() {
     assert!(sw_html.contains("patina-sweep-data"));
     assert!(!sw_html.contains("https://") && !sw_html.contains("http://"));
 
-    // Spawn `patina profile <cov_a1> --serve 127.0.0.1:0` and verify HTTP routes
+    // Spawn `patina inspect serve --addr 127.0.0.1:0 <cov_a1>` and verify HTTP routes
     let mut srv = Command::new(patina_bin())
         .args([
-            "profile",
-            cov_a1.to_str().unwrap(),
-            "--serve",
+            "inspect",
+            "serve",
+            "--addr",
             "127.0.0.1:0",
+            cov_a1.to_str().unwrap(),
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn profile --serve");
+        .expect("spawn inspect serve");
     let mut stderr = BufReader::new(srv.stderr.take().unwrap());
     let mut first_line = String::new();
     stderr.read_line(&mut first_line).expect("read serve URL");

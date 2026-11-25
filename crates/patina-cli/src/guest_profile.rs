@@ -39,72 +39,18 @@ const MAX_TIMELINE_EVENTS_HTML: usize = 5_000;
 const MAX_MEM_POINTS_HTML: usize = 600;
 const MAX_TRACE_EVENTS: usize = 250_000;
 
-/// Entry point for `patina profile`.
-pub fn main(args: &Args) -> Res<ExitCode> {
-    let (path_str, serve_pos_addr) = match args.positional.as_slice() {
-        [p] => (p.as_str(), None),
-        [p, a] if args.has("--serve") && args.last("--serve").unwrap_or("").is_empty() => {
-            (p.as_str(), Some(a.as_str()))
-        }
-        _ => {
-            return Err(
-                "usage: patina profile PATH [--format summary|json|trace|folded|html] [--out FILE] [--serve[=ADDR]]"
-                    .into(),
-            )
-        }
+fn single_path<'a>(args: &'a Args, usage: &str) -> Res<&'a Path> {
+    let [p] = args.positional.as_slice() else {
+        return Err(usage.into());
     };
-    let path = PathBuf::from(path_str);
+    let path = Path::new(p.as_str());
     if !path.exists() {
         return Err(format!("{}: no such file or directory", path.display()));
     }
+    Ok(path)
+}
 
-    let target = load_target(&path)?;
-
-    if args.has("--serve") {
-        let addr = match args.last("--serve").unwrap_or("") {
-            "" => serve_pos_addr.unwrap_or(DEFAULT_SERVE_ADDR),
-            a => a,
-        };
-        serve(&target, addr)?;
-        return Ok(ExitCode::SUCCESS);
-    }
-
-    let fmt = args.last("--format").unwrap_or("summary");
-    let output = match (&target, fmt) {
-        (ProfileTarget::Run(run), "summary") => format_run_summary(run),
-        (ProfileTarget::Run(run), "json") => serde_json::to_string_pretty(run).unwrap() + "\n",
-        (ProfileTarget::Run(run), "trace") => {
-            serde_json::to_string(&build_perfetto_trace(run)).unwrap() + "\n"
-        }
-        (ProfileTarget::Run(run), "folded") => format_folded(run)?,
-        (ProfileTarget::Run(run), "html") => {
-            let profile_json = serde_json::to_string(run).unwrap();
-            let trace_json = serde_json::to_string(&build_perfetto_trace(run)).unwrap();
-            crate::profile_html::render_run_html(&profile_json, &trace_json)
-        }
-        (ProfileTarget::Sweep(sweep), "summary") => format_sweep_summary(sweep),
-        (ProfileTarget::Sweep(sweep), "json") => {
-            serde_json::to_string_pretty(sweep).unwrap() + "\n"
-        }
-        (ProfileTarget::Sweep(sweep), "html") => {
-            let sweep_json = serde_json::to_string(sweep).unwrap();
-            crate::profile_html::render_sweep_html(&sweep_json)
-        }
-        (ProfileTarget::Sweep(_), "trace") => {
-            return Err(
-                "--format trace requires a single run directory (sweep directories support summary, json, html)"
-                    .into(),
-            )
-        }
-        (ProfileTarget::Sweep(_), "folded") => {
-            return Err(
-                "--format folded requires a single run directory with --profile-cpu (sweep directories support summary, json, html)"
-                    .into(),
-            )
-        }
-        (_, other) => return Err(format!("--format: unsupported format {other}")),
-    };
-
+fn write_output(args: &Args, output: &str) -> Res<ExitCode> {
     if let Some(out_path) = args.last("--out") {
         let p = Path::new(out_path);
         if let Some(parent) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -121,8 +67,78 @@ pub fn main(args: &Args) -> Res<ExitCode> {
             }
         }
     }
-
     Ok(ExitCode::SUCCESS)
+}
+
+/// Entry point for `patina inspect profile PATH [--format text|json] [--out FILE]`.
+pub fn inspect_profile(args: &Args) -> Res<ExitCode> {
+    let path = single_path(
+        args,
+        "usage: patina inspect profile PATH [--format text|json] [--out FILE]",
+    )?;
+    let target = load_target(path)?;
+    let output = match (&target, args.json()) {
+        (ProfileTarget::Run(run), false) => format_run_summary(run),
+        (ProfileTarget::Run(run), true) => serde_json::to_string_pretty(run).unwrap() + "\n",
+        (ProfileTarget::Sweep(sweep), false) => format_sweep_summary(sweep),
+        (ProfileTarget::Sweep(sweep), true) => serde_json::to_string_pretty(sweep).unwrap() + "\n",
+    };
+    write_output(args, &output)
+}
+
+/// Entry point for `patina inspect serve [--addr ADDR] PATH`.
+pub fn inspect_serve(args: &Args) -> Res<ExitCode> {
+    let path = single_path(args, "usage: patina inspect serve [--addr ADDR] PATH")?;
+    let target = load_target(path)?;
+    let addr = args.last("--addr").unwrap_or(DEFAULT_SERVE_ADDR);
+    serve(&target, addr)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Entry point for `patina inspect html [--out FILE] PATH`.
+pub fn inspect_html(args: &Args) -> Res<ExitCode> {
+    let path = single_path(args, "usage: patina inspect html [--out FILE] PATH")?;
+    let target = load_target(path)?;
+    let output = match &target {
+        ProfileTarget::Run(run) => {
+            let profile_json = serde_json::to_string(run).unwrap();
+            let trace_json = serde_json::to_string(&build_perfetto_trace(run)).unwrap();
+            crate::profile_html::render_run_html(&profile_json, &trace_json)
+        }
+        ProfileTarget::Sweep(sweep) => {
+            let sweep_json = serde_json::to_string(sweep).unwrap();
+            crate::profile_html::render_sweep_html(&sweep_json)
+        }
+    };
+    write_output(args, &output)
+}
+
+/// Entry point for `patina inspect trace [--out FILE] RUNDIR`.
+pub fn inspect_trace(args: &Args) -> Res<ExitCode> {
+    let path = single_path(args, "usage: patina inspect trace [--out FILE] RUNDIR")?;
+    let target = load_target(path)?;
+    let ProfileTarget::Run(run) = target else {
+        return Err(
+            "inspect trace requires a single run directory (use inspect html or inspect serve for a sweep)"
+                .into(),
+        );
+    };
+    let output = serde_json::to_string(&build_perfetto_trace(&run)).unwrap() + "\n";
+    write_output(args, &output)
+}
+
+/// Entry point for `patina inspect folded [--out FILE] RUNDIR`.
+pub fn inspect_folded(args: &Args) -> Res<ExitCode> {
+    let path = single_path(args, "usage: patina inspect folded [--out FILE] RUNDIR")?;
+    let target = load_target(path)?;
+    let ProfileTarget::Run(run) = target else {
+        return Err(
+            "inspect folded requires a single run directory with --profile-cpu (use inspect html or inspect serve for a sweep)"
+                .into(),
+        );
+    };
+    let output = format_folded(&run)?;
+    write_output(args, &output)
 }
 
 /// Auto-detected profile target: a single run directory or a sweep/campaign directory.
@@ -1894,7 +1910,7 @@ pub fn build_perfetto_trace(run: &RunProfile) -> Value {
         "traceEvents": events,
         "displayTimeUnit": "ms",
         "otherData": {
-            "generator": "patina profile",
+            "generator": "patina inspect",
             "schema": PROFILE_SCHEMA,
             "seed": run.seed,
             "digest": run.digest,
@@ -1912,7 +1928,7 @@ pub fn profile_sweep(dir: &Path) -> Res<SweepProfile> {
     let report_val = if let Ok(v) = read_json(&dir.join("report.json")) {
         v
     } else {
-        crate::report::build(&runs, &[], None, None, "patina report").0
+        crate::report::build(&runs, &[], None, None, "patina inspect summary").0
     };
 
     let mut outcomes: BTreeMap<String, usize> = BTreeMap::new();
@@ -2368,10 +2384,10 @@ impl PreparedPayload {
 /// Bind `TcpListener` on `addr` and return `(listener, local_addr)`.
 pub fn bind_server(addr: &str) -> Res<(TcpListener, SocketAddr)> {
     let listener =
-        TcpListener::bind(addr).map_err(|e| format!("--serve {addr}: bind failed: {e}"))?;
+        TcpListener::bind(addr).map_err(|e| format!("--addr {addr}: bind failed: {e}"))?;
     let local = listener
         .local_addr()
-        .map_err(|e| format!("--serve {addr}: local_addr: {e}"))?;
+        .map_err(|e| format!("--addr {addr}: local_addr: {e}"))?;
     Ok((listener, local))
 }
 
@@ -2480,7 +2496,7 @@ fn write_http_response(
 fn serve(target: &ProfileTarget, addr: &str) -> Res<()> {
     let payload = PreparedPayload::from_target(target);
     let (listener, local) = bind_server(addr)?;
-    eprintln!("patina profile: listening on http://{local}/");
+    eprintln!("patina inspect serve: listening on http://{local}/");
     eprintln!("  dashboard:     http://{local}/");
     eprintln!("  profile JSON:  http://{local}/profile.json");
     if payload.trace_json.is_some() {

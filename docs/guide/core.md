@@ -76,7 +76,7 @@ violation always: acked-records-kept: N acknowledged, N stored
   faults in every failing run: crash      in none: -
   rerun:  patina run --seed 2 --faults crash -- /tmp/app/app
   replay: patina replay /tmp/app/patina-out/sweep/seed-2
-  explain: patina explain /tmp/app/patina-out/sweep/seed-2
+  explain: patina inspect story /tmp/app/patina-out/sweep/seed-2
 ```
 
 Then `--seeds 1..200`, `1..2000`: a narrow window is found in one seed of thousands. `-j N`
@@ -87,11 +87,11 @@ sweeps`.
 **6. Read the groups, not the logs.** A group is one bug: its signature, how many runs hit it,
 its lowest seed (already replayed once) and the commands for that run. On a run directory:
 
-- `patina explain RUNDIR`: the run as a short story, ending with the event to stop at;
+- `patina inspect story RUNDIR`: the run as a short story, ending with the event to stop at;
 - `patina minimize RUNDIR`: the fewest fault settings that still fail the same way;
 - `patina debug RUNDIR`: the run stopped under gdb just before that event;
 - `patina replay RUNDIR`: the same run again, compared record by record;
-- `patina report DIR`: the summary again (`report.json` has every group);
+- `patina inspect summary DIR`: the summary again (`report.json` has every group);
 - `patina verify --seed N ...`: one seed under varied host conditions.
 
 `patina guide failures`.
@@ -103,13 +103,13 @@ survive, a clean exit `--ok-exit` should name). (4) A real bug. To check a fix, 
 group's `rerun:` line against the rebuilt program, then the same sweep command.
 
 **8. Report what you found, and what you did not look for.** A finding: its `rerun:` line,
-`patina --version` and the architecture, the `patina explain` lines that show the cause,
+`patina --version` and the architecture, the `patina inspect story` lines that show the cause,
 `patina minimize`'s command. A clean sweep: the seeds, the fault classes, what the check could
 detect, and what was not tried (no crashes, no rebuilt code). Never weaken a check or change
 the program to make a sweep pass; put a finding you will not fix now in a `--known` file.
 
 Keep run output out of your context: read the summary, `report.json`, `result.json` and
-`patina explain`, not `boundary.log`. Delete `patina-out` when done.
+`patina inspect story`, not `boundary.log`. Delete `patina-out` when done.
 
 ## Topics
 
@@ -119,12 +119,12 @@ Keep run output out of your context: read the summary, `report.json`, `result.js
 - `patina guide scheduling`: where threads switch, and what is not covered
 - `patina guide machines`: several machines in one run, and `patina ctl`
 - `patina guide sweeps`: seeds, test suites, kept runs, known findings
-- `patina guide failures`: reading a failing run: explain, debug, replay, logs
+- `patina guide failures`: reading a failing run: story, debug, replay, logs
 - `patina guide profiling`: 4-bucket attribution, Perfetto traces, CPU flamegraphs, edge coverage, HTML dashboards
 - `patina guide sdk`: the SDK in Rust, C, Go and Python
 - `patina guide limits`: host setup, containers, CI, and what Patina refuses
 - `patina guide config`: every `patina.toml` key
 - `patina guide outcomes`: every outcome and exit status
 
-`patina guide --list` lists them; `patina guide --format md` prints the markdown they are written
-in. `patina skill DIR` writes a small skill that points coding agents here.
+`patina guide list` lists them; `patina guide --format md` prints the markdown they are written
+in. `patina guide skill DIR` writes a small skill that points coding agents here.

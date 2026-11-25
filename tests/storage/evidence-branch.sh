@@ -79,7 +79,7 @@ stats f4b 'batch-atomic-across-keyspaces'
 echo "== E4: cost of the F2 branch sweep"
 for s in 1 2 3; do
     "$PATINA" run --seed $s --fault crash-permille=0 --faults buggify --env FJ_N=2000 --out "$RUNS/base-$s" $FJ -- $H >/dev/null 2>&1 || true
-    "$PATINA" log dump "$RUNS/base-$s/boot-1/boundary.log" | tail -1 | sed -n 's/^seq=\([0-9]*\) .*/\1/p' >"$RUNS/base-$s.last"
+    "$PATINA" inspect dump "$RUNS/base-$s/boot-1/boundary.log" | tail -1 | sed -n 's/^seq=\([0-9]*\) .*/\1/p' >"$RUNS/base-$s.last"
 done
 python3 -I - "$RUNS" <<'PY'
 import json, os, re, statistics, sys

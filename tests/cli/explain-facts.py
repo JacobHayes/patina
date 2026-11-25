@@ -1,5 +1,5 @@
-"""The facts of an explained run (tests/cli/14-explain-cases.sh): RUNDIR.story (`patina explain
---format json`) against RUNDIR.events (`patina log events`) and the run's result. Usage:
+"""The facts of an explained run (tests/cli/14-explain-cases.sh): RUNDIR.story (`patina inspect story
+--format json`) against RUNDIR.events (`patina inspect events`) and the run's result. Usage:
 explain-facts.py RUNDIR CASE PATINA, CASE one of thread, crash, machines, partition."""
 import json
 import subprocess
@@ -17,7 +17,7 @@ assert stop["kind"] == "stop", stop
 
 
 def full():
-    out = subprocess.run([patina, "explain", run, "--format", "json", "--full"],
+    out = subprocess.run([patina, "inspect", "story", run, "--format", "json", "--full"],
                          capture_output=True, text=True, check=True).stdout
     return [l for l in map(json.loads, out.splitlines()) if l["kind"] not in ("outcome", "stop")]
 
@@ -30,7 +30,7 @@ far = case in ("machines", "partition")
 assert len(lines) * (10 if far else 4) < len(records), (len(lines), len(records))
 assert told * (4 if far else 1) < len(records), (told, len(records))
 # The stop event is a record of the run, the same in `log events --from N --to N`.
-at = subprocess.run([patina, "log", "events", run, "--from", str(stop["seq"]), "--to", str(stop["seq"])],
+at = subprocess.run([patina, "inspect", "events", run, "--from", str(stop["seq"]), "--to", str(stop["seq"])],
                     capture_output=True, text=True, check=True).stdout.splitlines()
 ev = json.loads(at[-1])
 assert ev.get("seq") == stop["seq"], (ev, stop)

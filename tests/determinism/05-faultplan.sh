@@ -18,7 +18,7 @@ check() { # WORKLOAD SEED FAULT-OPTS...: from SEED, the first of 8 seeds at whic
         rm -rf "${out:?}/$w-on"
         # shellcheck disable=SC2086
         timeout 600 "$PATINA" run --seed "$seed" --out "$out/$w-on" --mount "$GDIR":/guest:copy $fopts -- $CMD >"$out/$w-on.txt" 2>&1 || true
-        "$PATINA" log dump "$out/$w-on/boot-1/boundary.log" >"$out/$w-on.dump"
+        "$PATINA" inspect dump "$out/$w-on/boot-1/boundary.log" >"$out/$w-on.dump"
         ff=$(first_fault "$out/$w-on.dump")
         [ -z "$ff" ] || break
         [ "$seed" -lt "$last" ] || die "$w: no fault fired at seeds $first..$last"
@@ -27,7 +27,7 @@ check() { # WORKLOAD SEED FAULT-OPTS...: from SEED, the first of 8 seeds at whic
     rm -rf "${out:?}/$w-off"
     timeout 600 "$PATINA" run --seed "$seed" --out "$out/$w-off" --mount "$GDIR":/guest:copy -- $CMD >"$out/$w-off.txt" 2>&1 || true
     # log diff exits 1 when the logs differ, as they must here.
-    st=0; "$PATINA" log diff "$out/$w-off/boot-1/boundary.log" "$out/$w-on/boot-1/boundary.log" >"$out/$w.diff" || st=$?
+    st=0; "$PATINA" inspect diff "$out/$w-off/boot-1/boundary.log" "$out/$w-on/boot-1/boundary.log" >"$out/$w.diff" || st=$?
     [ "$st" = 1 ] || die "$w: log diff exit $st (0: logs identical although a fault fired): $(tail -2 "$out/$w.diff")"
     d=$(sed -n 's/^first difference at record \([0-9]*\).*/\1/p' "$out/$w.diff")
     [ "$d" -ge "$ff" ] || die "$w seed $seed: logs differ at record $d, before the first fault at $ff"

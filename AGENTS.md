@@ -19,7 +19,7 @@ updates the docs in the same commit.
 
 User guidance is `docs/guide/*.md`, embedded at build and printed by `patina guide`; `./check docs`
 runs its commands and checks every name in it against `patina --help --format json`.
-The skill, `skills/patina/SKILL.md` (written by `patina skill`), only points agents to `patina
+The skill, `skills/patina/SKILL.md` (written by `patina guide skill`), only points agents to `patina
 guide`: it names no option or key, so it should almost never change.
 
 ## Layout

@@ -37,7 +37,7 @@ run_ok "$o/heal" 1 --config "$o/b.toml" $parts -- python3 /guest/ahead.py main h
 p=$(field "$o/heal/result.json" machines.partitions.0)
 python3 -I -c 'import json,sys; p=json.loads(sys.argv[1]); sys.exit(not (sorted(p["a"] + p["b"]) == ["b", "main"] and p["acted"]))' "$p" \
     || die "heal: the partition: $p"
-n=$("$PATINA" log events "$o/heal" --types sdk | grep -c '"op":"control"')
+n=$("$PATINA" inspect events "$o/heal" --types sdk | grep -c '"op":"control"')
 [ "$n" = 3 ] || die "heal: $n control calls in the events"
 echo "a heal ahead: the held ping answered; the seed's partition $p; main's control calls answered inside it"
 

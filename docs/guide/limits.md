@@ -20,7 +20,7 @@ On Ubuntu 24.04 and later, `patina doctor` prints the root command that installs
 
 <!-- no-run apparmor: needs root -->
 ```sh
-patina doctor --print-apparmor-profile | sudo tee /etc/apparmor.d/patina >/dev/null && sudo apparmor_parser -r /etc/apparmor.d/patina
+patina doctor apparmor | sudo tee /etc/apparmor.d/patina >/dev/null && sudo apparmor_parser -r /etc/apparmor.d/patina
 ```
 
 The profile admits whatever file is at that one path, so install patina where only root can

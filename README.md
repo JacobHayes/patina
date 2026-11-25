@@ -66,19 +66,19 @@ failure exit: panicked at src/main.rs:N:N: assertion `left == right` failed: res
   example: panicked at src/main.rs:28:5: assertion `left == right` failed: results out of job order
   rerun:  patina run --seed 1 -- /tmp/patina/examples/quickstart/target/debug/jobs
   replay: patina replay /tmp/patina/examples/quickstart/patina-out/sweep/seed-1
-  explain: patina explain /tmp/patina/examples/quickstart/patina-out/sweep/seed-1
+  explain: patina inspect story /tmp/patina/examples/quickstart/patina-out/sweep/seed-1
 ```
 
 Each group is one bug: its signature, how many runs hit it, and the lowest seed, already replayed
-once with the same result. Its `rerun:` line reproduces it; `patina explain` tells the run as a
+once with the same result. Its `rerun:` line reproduces it; `patina inspect story` tells the run as a
 story.
 
 ## Next
 
 Run `patina guide`. It is the documentation, built into the binary so it always matches the
 version you run: the workflow from the first run to a reported finding, then one topic at a
-time (`patina guide --list`). The same pages are in [docs/guide](docs/guide/core.md).
+time (`patina guide list`). The same pages are in [docs/guide](docs/guide/core.md).
 [examples/](examples/README.md) has one small program per kind of bug.
 
-For coding agents, `patina skill ~/.agents/skills` (or the skills directory your agent reads)
+For coding agents, `patina guide skill ~/.agents/skills` (or the skills directory your agent reads)
 writes a small skill that tells the agent when to use Patina and to start from `patina guide`.

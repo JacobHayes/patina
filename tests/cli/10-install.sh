@@ -40,7 +40,7 @@ for case in x86_64:x86_64-unknown-linux-musl aarch64:aarch64-unknown-linux-musl 
     [ "$st" = 0 ] || die "Linux/$m: exit $st: $(cat "$d/Linux-$m.txt")"
     # The installed binary is the archive's: it answered --version, then doctor.
     want=$(printf '%s --version\n' "$t")
-    [ "$restricted" = 0 ] || want=$(printf '%s\n%s doctor --print-apparmor-profile' "$want" "$t")
+    [ "$restricted" = 0 ] || want=$(printf '%s\n%s doctor apparmor' "$want" "$t")
     want=$(printf '%s\n%s doctor' "$want" "$t")
     [ "$(cat "$d/calls")" = "$want" ] ||
         die "Linux/$m: installed the wrong binary or ran the wrong commands: $(cat "$d/calls")"

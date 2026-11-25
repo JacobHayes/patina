@@ -27,11 +27,11 @@ seq 1 $((n + 1)) | xargs -P 4 -I{} bash -euo pipefail -O inherit_errexit -c '
 mid=$((n / 2)) late=$((n * 3 / 4))
 # first A B: the first record at which two runs' logs differ (log diff exits 1: they differ)
 first() {
-    "$PATINA" log diff "$1/boot-1/boundary.log" "$2/boot-1/boundary.log" >"$1.diff" || [ $? = 1 ]
+    "$PATINA" inspect diff "$1/boot-1/boundary.log" "$2/boot-1/boundary.log" >"$1.diff" || [ $? = 1 ]
     sed -n 's/^first difference at record \([0-9]*\) .*/\1/p' "$1.diff"
 }
 # cp_at RUN: the line number of the first CrashPoint record of a run's log dump
-cp_at() { "$PATINA" log dump "$1/boot-1/boundary.log" | awk '/ CrashPoint / && !n {n = NR} END {print n}'; }
+cp_at() { "$PATINA" inspect dump "$1/boot-1/boundary.log" | awk '/ CrashPoint / && !n {n = NR} END {print n}'; }
 for c in "$mid" "$late"; do
     i=$(($(cp_at "$d/c-$c") - 1))
     [ "$(first "$d/ref" "$d/c-$c")" = "$i" ] || die "child $c: first differs from the run without a crash at record $(first "$d/ref" "$d/c-$c"), its CrashPoint is record $i"

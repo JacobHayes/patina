@@ -36,7 +36,7 @@ if {k: v for k, v in b.items() if k in a} != a or list(extra) != ["net-chunk-max
 PY
     lhs=$(field "$d/base-$s/result.json" digest); rhs=$(field "$d/more-$s/result.json" digest)
     [ "$lhs" = "$rhs" ] \
-        || die "seed $s: net-chunk-max on a run without sockets changed the boundary log ($("$PATINA" log diff "$d/base-$s/boot-1/boundary.log" "$d/more-$s/boot-1/boundary.log" | head -1))"
+        || die "seed $s: net-chunk-max on a run without sockets changed the boundary log ($("$PATINA" inspect diff "$d/base-$s/boot-1/boundary.log" "$d/more-$s/boot-1/boundary.log" | head -1))"
     if [ "$(field "$d/base-$s/result.json" faults.injected)" -gt 0 ]; then found=$s; break; fi
 done
 [ -n "$found" ] || die "no seed of 1-8 injected a fault"
@@ -59,7 +59,7 @@ done
     die "max-boots: $(field "$d/boots-/result.json" boots) by default, $(field "$d/boots-2/result.json" boots) with 2"
 run "$d/gap" 1 --faults kill --fault crash-permille=1000 --fault max-boots=2 --fault down-ms=5000..5000 -- /guest/ack-log correct
 crash_t=$(jq -r '.crashes[0].vclock_ns' "$d/gap/result.json")
-first_t=$("$PATINA" log events "$d/gap" | jq -n '[inputs | select(.boot == 2 and .t) | .t][0]')
+first_t=$("$PATINA" inspect events "$d/gap" | jq -n '[inputs | select(.boot == 2 and .t) | .t][0]')
 gap=$((first_t - crash_t))
 [ "$gap" -ge 5000000000 ] && [ "$gap" -lt 5001000000 ] || die "down-ms=5000..5000: the restart began $gap ns after the crash"
 echo "down-ms=5000..5000: the restart's first record $gap virtual ns after the crash"

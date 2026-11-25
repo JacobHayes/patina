@@ -8,7 +8,7 @@ case $(uname -m) in x86_64) echo "SKIP: x86_64's struct epoll_event has no paddi
 o=$RUNS/09-epoll-pad
 run_ok "$o" 1 -- /guest/epoll-pad
 [ "$(cat "$o/boot-1/stdout")" = "ok 1 1" ] || die "guest: $(cat "$o/boot-1/stdout")"
-"$PATINA" log dump "$o/boot-1/boundary.log" >"$o/dump.txt"
+"$PATINA" inspect dump "$o/boot-1/boundary.log" >"$o/dump.txt"
 # epoll_ctl with op 3 (EPOLL_CTL_MOD): the input hashes; epoll_wait or epoll_pwait: the output hashes.
 mods=$(awk '$5 == "epoll_ctl" && $8 == "0x3," {print $NF}' "$o/dump.txt")
 waits=$(awk '($5 == "epoll_wait" || $5 == "epoll_pwait") && $0 ~ / ret=1 / {print $(NF-1)}' "$o/dump.txt")

@@ -13,21 +13,21 @@
 #    exit 1 with the same last line stay two. `--known`: the first matching line names a
 #    finding, known findings do not fail the sweep, `[*planted*]` selects by case, and a `!`
 #    entry that matched no run makes the report vacuous.
-# 3. `--ok-exit` and `patina log tree`: upcase (a short write gives the wrong file and exit 0)
+# 3. `--ok-exit` and `patina inspect tree`: upcase (a short write gives the wrong file and exit 0)
 #    swept with disk faults against a faults-off reference run with `--ok-exit 1 --check
 #    same-tree`: one `wrong-output` group with fs-short in every run and no failure (the plain
 #    sweep and `upcase fixed`: 02-sweeps.sh). An --ok-exit status the program did not exit with is
 #    still a failure, as is a listed status after an INVARIANT line, and a signal still a
 #    crash; the rerun line and run.json carry the list. `log tree` writes the tree the guest ended with (not the one it started from) and works
 #    on every boot of a crashed run.
-# 4. `patina log events`: a file created as a/x and renamed to b/y is named a/x before the
+# 4. `patina inspect events`: a file created as a/x and renamed to b/y is named a/x before the
 #    rename and b/y after it, under --disk's guest location; one line per trap record; two runs
 #    of one seed give the same bytes. examples/checks/confined and synced-before-mark, which
 #    read it, find their planted bugs over a seed range through --check and pass the fixes
 #    (marklog fixed marks progress before its fsync: only the `ack` marks are judged). An open
 #    through a symlink has its path as passed and the path it walked, the
 #    same in five runs under cpu and aslr variation.
-# 6. `patina report --recheck`: the same checker leaves each kept run's result.json byte for byte; a
+# 6. `patina recheck`: the same checker leaves each kept run's result.json byte for byte; a
 #    keyed finding (LABEL [KEY]: detail) is grouped by its key, and shown as written.
 # Quick tier: 1, 2, 3 and 6 (about 4 s on the arm64 runner); 4 and 5 in the area tier.
 #@ tier=quick budget=10 slots=2
@@ -136,13 +136,13 @@ rc=0
 [ "$rc" = 2 ] && [ "$(jq -r '.check.vacuous' kvn/report.json)" = true ] || die "a check that judged nothing: exit $rc: $(tail -3 kvn.txt)"
 [ "$(jq -r '.check.not_judged | keys[0]' kvn/report.json)" = "no crash in this run" ] || die "not judged reasons: $(jq -c .check kvn/report.json)"
 rc=0
-"$PATINA" report --allow-unmet check kvn >/dev/null || rc=$?
+"$PATINA" inspect summary --allow-unmet check kvn >/dev/null || rc=$?
 [ "$rc" = 0 ] || die "--allow-unmet check: exit $rc"
 
 # --allow-unmet patterns: unmet sometimes labels lib-a, lib-b and app-c.
 run sdk --mount "$root/sdk/python:/sdk" -- /usr/bin/python3 -I -c 'import sys; sys.path.insert(0, "/sdk"); import patina
 for l in ("lib-a", "lib-b", "app-c"): patina.Sometimes(l).check(False)' >/dev/null
-unmet() { rc=0; "$PATINA" report --format json "$@" sdk >unmet.json || rc=$?; echo "$rc $(jq -r '.sdk.sometimes_never_held | join(",")' unmet.json)"; }
+unmet() { rc=0; "$PATINA" inspect summary --format json "$@" sdk >unmet.json || rc=$?; echo "$rc $(jq -r '.sdk.sometimes_never_held | join(",")' unmet.json)"; }
 [ "$(unmet --allow-unmet 'lib-*')" = "2 app-c" ] || die "--allow-unmet 'lib-*': $(unmet --allow-unmet 'lib-*')"
 [ "$(unmet --allow-unmet 'lib-*' --allow-unmet app-c)" = "0 " ] || die "--allow-unmet 'lib-*' app-c: $(unmet --allow-unmet 'lib-*' --allow-unmet app-c)"
 [ "$(unmet --allow-unmet '*')" = "0 " ] || die "--allow-unmet '*': $(unmet --allow-unmet '*')"
@@ -171,7 +171,7 @@ calc_groups=$(jq -r '[.groups[] | "\(.signature) (\(.cases | length) cases)"] | 
 # Known: the first matching line names a run; [*planted*] selects by the case line.
 printf '%s\n' '!planted [*planted*] violation check: wrong-sub*' 'clamp violation check: wrong-sub: *' 'fixed violation check: wrong-add*' >known1
 cp known1 known2; echo 'mul-zero violation check: wrong-mul: *' >>known2
-kn() { rc=0; "$PATINA" report --format json --known "$@" >kn.json || rc=$?; echo "$rc $(jq -r '[.known.entries[] | "\(.id)=\(.count)"] | join(" ")' kn.json) new=$(jq '[.groups[] | select(.known == null)] | length' kn.json)"; }
+kn() { rc=0; "$PATINA" inspect summary --format json --known "$@" >kn.json || rc=$?; echo "$rc $(jq -r '[.known.entries[] | "\(.id)=\(.count)"] | join(" ")' kn.json) new=$(jq '[.groups[] | select(.known == null)] | length' kn.json)"; }
 [ "$(kn known1 calcs)" = "1 planted=2 clamp=4 fixed=0 new=1" ] || die "known file without mul-zero: $(kn known1 calcs)"
 [ "$(kn known2 calcs)" = "0 planted=2 clamp=4 fixed=0 mul-zero=4 new=0" ] || die "known file naming both: $(kn known2 calcs)"
 # The sweep with the known file says what the report over its runs says.
@@ -179,7 +179,7 @@ kn() { rc=0; "$PATINA" report --format json --known "$@" >kn.json || rc=$?; echo
 grep -q '^known: .*none new' calcs.txt || die "sweep --known printed no known: line: $(cat calcs.txt)"
 # Without the planted case's runs, the !planted entry makes the report vacuous.
 rc=0
-"$PATINA" report --known known2 $(ls -d calcs/seed-*/* | grep -v planted) >noplant.txt || rc=$?
+"$PATINA" inspect summary --known known2 $(ls -d calcs/seed-*/* | grep -v planted) >noplant.txt || rc=$?
 [ "$rc" = 2 ] && grep -q '!planted matched no run' noplant.txt || die "without the planted case: exit $rc: $(cat noplant.txt)"
 # Two tests that exit 1 with the same last line stay two groups.
 printf '%s\n' "/bin/sh -c 'echo boom >&2; exit 1' first" "/bin/sh -c 'echo boom >&2; exit 1' second" >two.txt
@@ -216,20 +216,20 @@ mkdir lt-start && echo old >lt-start/gone && echo keep >lt-start/kept
 list='find . -mindepth 1 -path ./listing -prune -o -printf "%p %y %m %l\n" | LC_ALL=C sort; find . -type f ! -name listing | LC_ALL=C sort | xargs cat'
 run lt --disk lt-start -- /bin/sh -c "rm gone; mkdir -p d/e; echo new >d/f; chmod 640 d/f; ln -s d/f l; { $list; } >listing" >/dev/null
 [ "$(jq -r .outcome lt.json)" = ok ] || die "log tree guest: $(tail -2 lt.err)"
-"$PATINA" log tree lt/boot-1 lt-tree || die "log tree failed"
+"$PATINA" inspect tree lt/boot-1 lt-tree || die "log tree failed"
 mv lt-tree/listing lt-listing
 # lint-allow: plain-sh — the listing command the guest ran under /bin/sh, run the same way
 lhs=$(cd lt-tree && sh -c "$list"); rhs=$(cat lt-listing)
 [ "$lhs" = "$rhs" ] || die "log tree differs from the guest's own tree: $lhs"
-! "$PATINA" log tree lt/boot-1 lt-tree 2>/dev/null || die "log tree wrote into a directory that is not empty"
+! "$PATINA" inspect tree lt/boot-1 lt-tree 2>/dev/null || die "log tree wrote into a directory that is not empty"
 # A sweep without a checker prunes the logs of its ok runs.
 "$PATINA" sweep --seeds 1..2 --out prn -- "$hello" >prn.txt 2>&1 || die "sweep of hello: $(tail -2 prn.txt)"
 pruned=$(for d in prn/seed-*; do [ -d "$d/boot-1" ] || { echo "$d"; break; }; done)
-[ -n "$pruned" ] && ! "$PATINA" log tree "$pruned/boot-1" lt-pruned 2>/dev/null && [ ! -e lt-pruned ] || die "log tree of a pruned run '$pruned'"
+[ -n "$pruned" ] && ! "$PATINA" inspect tree "$pruned/boot-1" lt-pruned 2>/dev/null && [ ! -e lt-pruned ] || die "log tree of a pruned run '$pruned'"
 # Every boot of a crashed run; each holds at least the records acknowledged in it.
 n=0
 for inc in "$first"/boot-*; do
-    "$PATINA" log tree "$inc" "lt-$n" || die "log tree $inc"
+    "$PATINA" inspect tree "$inc" "lt-$n" || die "log tree $inc"
     last=$(sed -n 's/^ack //p' "$inc/stdout" | tail -n1)
     [ $(($(wc -c <"lt-$n/data.log") / 8)) -gt "${last:--1}" ] || die "log tree $inc: fewer records than acknowledged"
     n=$((n + 1))
@@ -252,21 +252,21 @@ mkdir app
     done
 ) &
 sweeps=$!
-for n in tour tour2; do is $n "$(run $n -- "$files" tour)" 0 ok exit; "$PATINA" log events $n >$n.jsonl; done
+for n in tour tour2; do is $n "$(run $n -- "$files" tour)" 0 ok exit; "$PATINA" inspect events $n >$n.jsonl; done
 is app "$(run app --disk app:/var/lib/app -- "$files" tour)" 0 ok exit
 cmp -s tour.jsonl tour2.jsonl || die "two runs of one seed: the streams differ"
 jq -e -s '.[0].v == 1 and all(.[1:][]; (.type | type) == "string" and (.boot | type) == "number")' tour.jsonl >/dev/null || die "a line without type or inc"
 ops=$(jq -r 'select(.type == "op" and .op != "close") | "\(.op) \(.path)\(if .to then " " + .to else "" end)"' tour.jsonl | paste -sd,)
 [ "$ops" = "mkdir /work/a,mkdir /work/b,create /work/a/x,rename /work/a/x /work/b/y,write /work/b/y,fsync /work/b/y" ] || die "tour: ops: $ops"
-traps=$("$PATINA" log dump tour/boot-1/boundary.log | awk '$2 == "trap"' | wc -l)
+traps=$("$PATINA" inspect dump tour/boot-1/boundary.log | awk '$2 == "trap"' | wc -l)
 calls=$(jq -s 'map(select(.type | IN("call", "sdk", "mark"))) | length' tour.jsonl)
 [ "$calls" = "$traps" ] || die "tour: $calls calls for $traps trap records"
 rc=0
 "$PATINA" verify --seed 2 --runs 5 --vary cpu,aslr --out lp -- "$PATINA_GUESTS/oracles-paths" tour >lp.txt 2>&1 || rc=$? # lint-allow: seed — verify repeats one seed; any seed shows it
 [ "$rc" = 0 ] && grep -q '^identical: 5 runs' lp.txt || die "verify, paths: $(tail -3 lp.txt)"
-lp=$("$PATINA" log events lp/run-0 --types call | jq -r 'select(.path == "link/a.txt") | .resolved')
+lp=$("$PATINA" inspect events lp/run-0 --types call | jq -r 'select(.path == "link/a.txt") | .resolved')
 [ "$lp" = /work/data/a.txt ] || die "paths: link/a.txt resolved to '$lp'"
-app=$("$PATINA" log events app --types op | jq -r 'select(.type == "op") | .path' | sort -u | paste -sd,)
+app=$("$PATINA" inspect events app --types op | jq -r 'select(.type == "op") | .path' | sort -u | paste -sd,)
 [ "$app" = "/var/lib/app/a,/var/lib/app/a/x,/var/lib/app/b,/var/lib/app/b/y" ] || die "--disk DIR:/var/lib/app: paths $app"
 wait "$sweeps"
 # found: GROUPS SIGNATURE-PREFIX (one group whose signature starts so), or none
@@ -311,7 +311,7 @@ is okany "$(run okany --ok-exit any -- /bin/sh -c 'exit 200')" 0 ok ok-exit
 is okanysig "$(run okanysig --ok-exit any -- /usr/bin/python3 -I -c 'import os; os.abort()')" 1 crash signal
 # Faults in a known pattern: fs-short fired in every upcase finding.
 printf '%s\n' 'calm violation check: wrong-output* {faults: -}' 'short violation check: wrong-output* {faults: *fs-short*}' >known-f
-[ "$("$PATINA" report --format json --known known-f up1 | jq -r '[.known.entries[] | "\(.id)=\(.count)"] | join(" ")')" = "calm=0 short=$(jq .findings up1/report.json)" ] || die "{faults: ...} in a known pattern"
+[ "$("$PATINA" inspect summary --format json --known known-f up1 | jq -r '[.known.entries[] | "\(.id)=\(.count)"] | join(" ")')" = "calm=0 short=$(jq .findings up1/report.json)" ] || die "{faults: ...} in a known pattern"
 # Case lines with settings: their own --env and --disk; [CASE] is the line after its settings.
 mkdir cw && echo from-work >cw/f
 printf '%s\n' "--env V=one -- /bin/sh -c 'echo \$V; cat /w/f; exit 1' a" "--disk $RUNS/cw:/w --env V=two -- /bin/sh -c 'echo \$V; cat /w/f; exit 1' b" >cw.txt
@@ -323,7 +323,7 @@ rc=0
 "$PATINA" sweep --seeds 1 --cases cw-bad.txt --out cw-bad >cw-bad.out 2>&1 || rc=$?
 [ "$rc" = 2 ] && grep -q -- '--fault is a setting of the whole sweep' cw-bad.out && [ ! -e cw-bad/seed-1 ] || die "a sweep's flag on a case line: exit $rc: $(cat cw-bad.out)"
 # The report: a group in full by its number, and its runs listed in report.json.
-"$PATINA" report --group 2 calcs >g2.txt || true
+"$PATINA" inspect summary --group 2 calcs >g2.txt || true
 lhs=$(head -1 g2.txt); rhs=$(jq -r '.groups[1].signature' calcs/report.json)
 [ "$lhs" = "$rhs" ] && grep -q '^  replay: ' g2.txt || die "report --group 2: $(cat g2.txt)"
 lhs=$(jq '[.groups[].runs | length] | add' calcs/report.json); rhs=$(jq .findings calcs/report.json)
@@ -331,12 +331,12 @@ lhs=$(jq '[.groups[].runs | length] | add' calcs/report.json); rhs=$(jq .finding
 echo "serve: $(groups calcs-serve); garbage and gone: 18 errors each; case settings, faults patterns, --group, --ok-exit any"
 fi
 
-# 6. Judging kept runs again (`patina report --recheck`). The same checker leaves every kept run's
+# 6. Judging kept runs again (`patina recheck`). The same checker leaves every kept run's
 #    result.json as it was, byte for byte; a checker that names its finding LABEL [KEY] is
 #    grouped by the key alone in every run whose logs were kept, and the report shows one
 #    finding as the checker wrote it.
 for r in calcs/seed-*/*; do [ ! -d "$r/boot-1" ] || cp "$r/result.json" "$r/result.before"; done
-"$PATINA" report --recheck calcs >rk.txt 2>&1 || true
+"$PATINA" recheck calcs >rk.txt 2>&1 || true
 n=0
 for b in calcs/seed-*/*/result.before; do
     cmp -s "$b" "${b%.before}.json" || die "recheck with the same checker rewrote $(dirname "$b")/result.json"
@@ -344,7 +344,7 @@ for b in calcs/seed-*/*/result.before; do
 done
 [ "$n" -gt 0 ] || die "no kept calc run to judge again"
 sed 's/echo "wrong-$1: got $g, want $w"/echo "wrong [$1]: got $g, want $w (0x$g)"/' chk/calc >chk/calc-key && chmod +x chk/calc-key
-"$PATINA" report --recheck --check chk/calc-key calcs >rk2.txt 2>&1 || true
+"$PATINA" recheck --check chk/calc-key calcs >rk2.txt 2>&1 || true
 # Every finding whose logs the sweep kept (a group's first three) is judged again; the others
 # keep their verdict, as a pruned ok run does.
 keyed=$(for r in calcs/seed-*/*; do [ ! -d "$r/boot-1" ] || jq -r 'select(.outcome == "violation") | .signature' "$r/result.json"; done | sort -u | paste -sd,)

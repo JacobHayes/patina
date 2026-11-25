@@ -39,7 +39,7 @@ for m in mremap mprotect munmap remap; do
     [ "$(field "$r/result.json" rewrite.dropped)" = 0 ] || die "$m: the plan was dropped"
     page=$hot change=$m
     case $m in remap) page=$cold change=munmap ;; esac
-    "$PATINA" log dump "$r/boot-1/boundary.log" >"$o/$m.log" 2>&1 || die "$m: log dump: $(head -1 "$o/$m.log")"
+    "$PATINA" inspect dump "$r/boot-1/boundary.log" >"$o/$m.log" 2>&1 || die "$m: log dump: $(head -1 "$o/$m.log")"
     python3 -I - "$o/$m.log" "$change" "$page" <<'EOF' || die "$m: no point taken in 0x$page's page after the $change"
 import re, sys
 log, change, page = sys.argv[1], sys.argv[2], int(sys.argv[3], 16) & ~4095
