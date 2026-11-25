@@ -16,6 +16,7 @@ pub enum Cmd {
     Log,
     Doctor,
     Sweep,
+    Batch,
     Report,
     Minimize,
     Ctl,
@@ -73,6 +74,12 @@ pub const COMMANDS: &[Command] = &[
         name: "sweep",
         usage: "patina sweep [--seeds A..B] [--cases FILE] [-j N] [run options] [-- CMD ARGS...]",
         help: "many seeds in parallel, each a normal run; findings grouped by signature",
+    },
+    Command {
+        cmd: Cmd::Batch,
+        name: "batch",
+        usage: "patina batch [-j N] [run options] [-- CMD ARGS...]",
+        help: "persistent worker pool reading NDJSON runs on stdin",
     },
     Command {
         cmd: Cmd::Report,
@@ -152,9 +159,16 @@ impl Flag {
     }
 }
 
-const RUNLIKE: &[Cmd] = &[Cmd::Run, Cmd::Verify, Cmd::Sweep];
+const RUNLIKE: &[Cmd] = &[Cmd::Run, Cmd::Verify, Cmd::Sweep, Cmd::Batch];
 /// Listed apart in `patina --help`: plumbing most users never type.
-const ADVANCED: &[Cmd] = &[Cmd::Verify, Cmd::Log, Cmd::Ctl, Cmd::Wait, Cmd::Skill];
+const ADVANCED: &[Cmd] = &[
+    Cmd::Verify,
+    Cmd::Batch,
+    Cmd::Log,
+    Cmd::Ctl,
+    Cmd::Wait,
+    Cmd::Skill,
+];
 /// The commands that print a result (`--format`).
 const FORMATTED: &[Cmd] = &[
     Cmd::Run,
@@ -165,6 +179,7 @@ const FORMATTED: &[Cmd] = &[
     Cmd::Log,
     Cmd::Doctor,
     Cmd::Sweep,
+    Cmd::Batch,
     Cmd::Report,
     Cmd::Minimize,
     Cmd::Ctl,
@@ -179,6 +194,7 @@ const ALL: &[Cmd] = &[
     Cmd::Log,
     Cmd::Doctor,
     Cmd::Sweep,
+    Cmd::Batch,
     Cmd::Report,
     Cmd::Minimize,
     Cmd::Ctl,
@@ -225,7 +241,13 @@ const fn many(
 }
 
 pub const FLAGS: &[Flag] = &[
-    flag("--seed", "N", "0", "the seed", &[Cmd::Run, Cmd::Verify]),
+    flag(
+        "--seed",
+        "N",
+        "0",
+        "the seed",
+        &[Cmd::Run, Cmd::Verify, Cmd::Batch],
+    ),
     Flag {
         name: "--out",
         value: "DIR",
@@ -330,7 +352,7 @@ pub const FLAGS: &[Flag] = &[
         value: "N",
         default: "the CPUs, at most 8",
         help: "runs at once, one CPU each (also -j N)",
-        cmds: &[Cmd::Sweep, Cmd::Report],
+        cmds: &[Cmd::Sweep, Cmd::Batch, Cmd::Report],
         repeat: false,
         per: &[(
             Cmd::Report,
@@ -559,7 +581,7 @@ pub fn parse(cmd: Cmd, args: &[String]) -> Res<Args> {
                 out.flags.entry("--help").or_default();
                 continue;
             }
-            if a == "-j" && matches!(cmd, Cmd::Sweep | Cmd::Report) {
+            if a == "-j" && matches!(cmd, Cmd::Sweep | Cmd::Batch | Cmd::Report) {
                 let v = it.next().ok_or("-j needs N")?;
                 out.flags.insert("--jobs", vec![v.clone()]);
                 continue;

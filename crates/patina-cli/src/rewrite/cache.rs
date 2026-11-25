@@ -113,7 +113,7 @@ pub struct Planner {
     build: String,
     par: Par,
     notice: Arc<Notice>,
-    known: Mutex<HashMap<Key, Entry>>,
+    known: Arc<Mutex<HashMap<Key, Entry>>>,
     /// Files the runtime asked for, in the order first asked.
     reported: Mutex<Vec<ImageReport>>,
     seen: Mutex<std::collections::HashSet<Key>>,
@@ -557,7 +557,21 @@ impl Planner {
                 state: Mutex::new(NoticeState::default()),
                 done: Condvar::new(),
             }),
-            known: Mutex::new(HashMap::new()),
+            known: Arc::new(Mutex::new(HashMap::new())),
+            reported: Mutex::new(vec![]),
+            seen: Mutex::new(Default::default()),
+        }
+    }
+
+    /// A per-run view sharing the in-memory plan lookup cache (`known`), with isolated
+    /// `reported` and `seen` state so concurrent or sequential runs never mix image reports.
+    pub fn session(&self) -> Planner {
+        Planner {
+            dir: self.dir.clone(),
+            build: self.build.clone(),
+            par: self.par.clone(),
+            notice: Arc::clone(&self.notice),
+            known: Arc::clone(&self.known),
             reported: Mutex::new(vec![]),
             seen: Mutex::new(Default::default()),
         }

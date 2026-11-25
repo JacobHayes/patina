@@ -296,6 +296,30 @@ pub struct Opts {
     pub machine_programs: Vec<Program>,
 }
 
+impl Opts {
+    /// Clone `self` for a new seed and optional extra arguments (replacing `{}` in `cmd` if
+    /// present, otherwise appending to `cmd`), refreshing only the seed-dependent fault plan.
+    pub fn for_batch(&self, seed: u64, extra_args: &[String]) -> Res<Opts> {
+        let mut o = self.clone();
+        o.cfg.seed = seed;
+        if !extra_args.is_empty() {
+            if let Some(pos) = o.cfg.cmd.iter().position(|w| w == "{}") {
+                let mut cmd = Vec::with_capacity(o.cfg.cmd.len() - 1 + extra_args.len());
+                cmd.extend_from_slice(&o.cfg.cmd[..pos]);
+                cmd.extend_from_slice(extra_args);
+                cmd.extend_from_slice(&o.cfg.cmd[pos + 1..]);
+                o.cfg.cmd = cmd;
+            } else {
+                o.cfg.cmd.extend_from_slice(extra_args);
+            }
+        }
+        if seed != self.cfg.seed {
+            o.plan = o.cfg.resolve_plan()?;
+        }
+        Ok(o)
+    }
+}
+
 fn expand(base: &Path, p: &str) -> PathBuf {
     let p = match p.strip_prefix("~/") {
         Some(rest) => std::env::var_os("HOME")
@@ -430,7 +454,7 @@ fn mount(base: &Path, s: &str) -> Res<Mount> {
 pub fn sha256_file(p: &Path) -> Res<String> {
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::MetadataExt;
-    const CACHED_FROM: u64 = 1 << 20;
+    const CACHED_FROM: u64 = 64 << 10;
     let m = std::fs::metadata(p).map_err(|e| format!("{}: {e}", p.display()))?;
     let at = crate::launch::cache_dir()
         .join("sha256")
@@ -1275,8 +1299,8 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
 }
 
 impl Config {
-    /// Check every setting and build the launcher's plan around an already resolved program.
-    pub fn opts_with(&self, program: Program) -> Res<Opts> {
+    /// Resolve the seed-dependent fault/compute plan without re-hashing or re-checking files.
+    pub fn resolve_plan(&self) -> Res<faults::Plan> {
         // Faults asked for: any class, or any key but the scheduler's `compute-*`.
         let asked = !self.fault_classes.is_empty()
             || self.faults.iter().any(|s| !s.starts_with("compute-"));
@@ -1333,6 +1357,12 @@ impl Config {
         if self.has_ready() {
             plan.faults.fault_after_seq = u64::MAX;
         }
+        Ok(plan)
+    }
+
+    /// Check every setting and build the launcher's plan around an already resolved program.
+    pub fn opts_with(&self, program: Program) -> Res<Opts> {
+        let plan = self.resolve_plan()?;
         let fs_model = Model::parse(&self.fs_model).ok_or_else(|| {
             format!(
                 "fs-model: unknown model {} (ext4-ordered, posix-strict)",

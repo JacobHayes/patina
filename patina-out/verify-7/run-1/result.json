@@ -1,0 +1,177 @@
+{
+  "boots": 1,
+  "compute": {
+    "charge_ns": 1,
+    "deadline_stops": 0,
+    "events": 5180,
+    "gap": 3,
+    "images": [],
+    "images_dropped": 0,
+    "switches": 13
+  },
+  "counters": {
+    "insn": {
+      "emulated": {
+        "cntfrq": 0,
+        "cntvct": 0,
+        "rndr": 0,
+        "rndrrs": 0
+      },
+      "patched_sites": {
+        "pause": 0,
+        "rndr": 0,
+        "rndrrs": 0
+      },
+      "scan": {
+        "bytes": 1904640,
+        "mappings": 3,
+        "pacga_sites": 0,
+        "rejected_sites": 0,
+        "reused_mappings": 0,
+        "table_full": 0
+      }
+    },
+    "io": {
+      "blocking_done": 0,
+      "blocking_parked": 0,
+      "parks": 0,
+      "reattempts": 0,
+      "spurious": 0
+    },
+    "net": {
+      "blacked_out": 0,
+      "bytes": 0,
+      "chunks": 0,
+      "connections": 0,
+      "datagrams": 0,
+      "dgram_delivered": 0,
+      "dgram_lost": 0,
+      "fins": 0,
+      "peak_queued": 0,
+      "refused": 0,
+      "resets": 0,
+      "sends": 0,
+      "steps": 0,
+      "sup_hwm_kb": 4364,
+      "timeouts": 0,
+      "unknown_opts": 0
+    },
+    "sched": {
+      "pause_points": 0,
+      "spin_found": 0,
+      "spin_probes": 0,
+      "spin_steps": 0,
+      "spin_yields": 0
+    }
+  },
+  "crashes": [],
+  "digest": "a3e72f4bb7d68c7e",
+  "exit": 0,
+  "faults": {
+    "counts": {},
+    "injected": 0,
+    "plan": {},
+    "recent": []
+  },
+  "guest": {
+    "exit": 0,
+    "signal": null
+  },
+  "labels": {
+    "pacga_sites": 0,
+    "unix_sockets_in_flight": 0,
+    "unscanned_exec_mappings": 0
+  },
+  "message": "the program exited 0",
+  "missing": [],
+  "outcome": "ok",
+  "refused": [
+    "rseq"
+  ],
+  "rewrite": {
+    "applied": 3,
+    "cpuid": 0,
+    "dropped": 0,
+    "images": [
+      {
+        "back_edges_covered_pct": 100.0,
+        "cache": "hit",
+        "covered_pct": 100.0,
+        "cpuid_patched": 0,
+        "cpuid_unpatched": 0,
+        "dark_pct": 9.6,
+        "patches": 302,
+        "path": "/usr/bin/true",
+        "rewrite_ms": 0,
+        "sha256": "a82c1b5fd392d72148d53992a860224ff3753cb2dc8909e9bdd1620e54ee1b88",
+        "sites": 302,
+        "status": "planned",
+        "text_bytes": 9928
+      },
+      {
+        "back_edges_covered_pct": 99.8,
+        "cache": "hit",
+        "covered_pct": 99.8,
+        "cpuid_patched": 0,
+        "cpuid_unpatched": 0,
+        "dark_pct": 0.0,
+        "patches": 2420,
+        "path": "/usr/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1",
+        "rewrite_ms": 0,
+        "sha256": "124e3f166bdc0be365eaa6dc59e415b876b0841a40463edd1b0e084b518bb7cd",
+        "sites": 2424,
+        "status": "planned",
+        "text_bytes": 114912
+      },
+      {
+        "back_edges_covered_pct": 99.9,
+        "cache": "hit",
+        "covered_pct": 99.9,
+        "cpuid_patched": 0,
+        "cpuid_unpatched": 0,
+        "dark_pct": 2.5,
+        "patches": 26117,
+        "path": "/usr/lib/aarch64-linux-gnu/libc.so.6",
+        "rewrite_ms": 0,
+        "sha256": "2544e7902ec1bd3a68b526b6af427c34d2a98e56b9dbf8395b4b498dd2112cd6",
+        "sites": 26142,
+        "status": "planned",
+        "text_bytes": 1165380
+      }
+    ],
+    "interior": 0,
+    "lines": 0,
+    "points": 13,
+    "rebuilt": 0,
+    "restored": 0,
+    "stays": 0,
+    "unplanned": 0,
+    "walk_max": 13,
+    "walk_steps": 6,
+    "walks": 2,
+    "walks_cut": 0
+  },
+  "sched": {
+    "mode": "points",
+    "pause_points": 0,
+    "pause_sites": 0,
+    "preemptions": 13,
+    "switches": 0,
+    "traps": 27
+  },
+  "schema": "patina.result/v3",
+  "sdk": {
+    "dropped": 0,
+    "sites": [],
+    "violation": null
+  },
+  "seed": 7,
+  "shadow_bytes": 0,
+  "signature": null,
+  "stop": "exit",
+  "tmpfs": {
+    "bytes": 268435456,
+    "enospc": 0
+  },
+  "wall_ms": 22
+}

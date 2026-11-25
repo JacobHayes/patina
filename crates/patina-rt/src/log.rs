@@ -16,8 +16,8 @@ fn ensure(len: u64) {
         return;
     }
     let mut cap = c.log_cap.load(Relaxed);
-    if len > cap {
-        let newcap = cap + LOG_STEP;
+    while len > cap {
+        let newcap = cap + log_grow_step(cap);
         grow(cap, newcap);
         c.log_cap.store(newcap, Relaxed);
         cap = newcap;
