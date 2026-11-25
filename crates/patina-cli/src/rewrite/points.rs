@@ -550,7 +550,7 @@ impl Space {
 /// One patch's instructions: address, decode, original bytes.
 type Insns<'a> = Vec<(u64, Instruction, &'a [u8])>;
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 pub fn emit(
     code: &Code,
     patches: &BTreeMap<u64, (Form, u8)>,
