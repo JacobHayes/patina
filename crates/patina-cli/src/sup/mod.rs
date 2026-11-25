@@ -160,12 +160,13 @@ impl Sup {
             return;
         }
         let mut cap = self.ctl.log_cap.load(Relaxed);
-        if len > cap {
+        while len > cap {
+            let step = log_grow_step(cap);
             // Blocks allocated now, as the runtime does (`rt::log::grow`).
-            let r = unsafe { libc::fallocate(FD_LOG, 0, cap as i64, LOG_STEP as i64) };
+            let r = unsafe { libc::fallocate(FD_LOG, 0, cap as i64, step as i64) };
             let err = std::io::Error::last_os_error();
             let r = if r != 0 && err.raw_os_error() == Some(libc::EOPNOTSUPP) {
-                unsafe { libc::ftruncate(FD_LOG, (cap + LOG_STEP) as i64) }
+                unsafe { libc::ftruncate(FD_LOG, (cap + step) as i64) }
             } else {
                 r
             };
@@ -176,7 +177,7 @@ impl Sup {
                     "extending the boundary log",
                 ));
             }
-            cap += LOG_STEP;
+            cap += step;
             self.ctl.log_cap.store(cap, Relaxed);
         }
         let p = unsafe {

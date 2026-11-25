@@ -15,11 +15,24 @@ pub const CTL_ADDR: u64 = 0x6020_0000_0000;
 pub const CTL_RW_LO: u64 = 0x6021_0000_0000;
 /// Boundary log: the published address (an inaccessible reservation of `LOG_GUARD` bytes),
 /// and the window whose first `RW_SPAN` bytes hold the read-write mapping's drawn start (it
-/// grows upwards in `LOG_STEP` steps, to the end of the runtime's region).
+/// starts at `LOG_INIT` and grows geometrically up to `LOG_STEP` steps, to the end of the
+/// runtime's region).
 pub const LOG_ADDR: u64 = 0x6030_0000_0000;
 pub const LOG_GUARD: u64 = 1 << 30;
 pub const LOG_RW_LO: u64 = 0x6031_0000_0000;
+pub const LOG_INIT: u64 = 64 << 10;
 pub const LOG_STEP: u64 = 16 << 20;
+
+/// Next growth step for the boundary log from current capacity `cap`: doubles up to `LOG_STEP`,
+/// always a multiple of `PAGE`.
+pub const fn log_grow_step(cap: u64) -> u64 {
+    let s = if cap < LOG_INIT { LOG_INIT } else { cap };
+    if s > LOG_STEP {
+        LOG_STEP
+    } else {
+        s
+    }
+}
 /// The longest boundary log (28 GiB): what fits above the highest drawn start, so the limit
 /// does not depend on the draw.
 pub const LOG_MAX: u64 = RT_REGION_END - (LOG_RW_LO + RW_SPAN);

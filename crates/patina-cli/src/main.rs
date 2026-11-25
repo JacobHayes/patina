@@ -1,6 +1,7 @@
 //! `patina`: the command line, the launcher, the sandbox's keeper (hidden `__sandbox`), the
 //! supervisor (hidden `__sup`) and the tools.
 
+mod batch;
 mod branch;
 mod check;
 mod cli;
@@ -129,6 +130,7 @@ fn main() -> ExitCode {
         Cmd::Log => log::main(&a).map_err(error),
         Cmd::Doctor => doctor::doctor(&a).map_err(error),
         Cmd::Sweep => sweep::main(&a),
+        Cmd::Batch => batch::main(&a),
         Cmd::Report if a.has("--recheck") => recheck::main(&a),
         Cmd::Report if a.has("--check") || a.has("--jobs") => Err(error(
             "--check and -j judge runs again: give --recheck".into(),

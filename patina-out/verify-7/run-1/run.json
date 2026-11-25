@@ -1,0 +1,44 @@
+{
+  "config": {
+    "allow-unmet": [],
+    "cmd": [
+      "/bin/true"
+    ],
+    "cpus": 4,
+    "disk": null,
+    "emulate-rndr": false,
+    "env": [],
+    "fault-classes": [],
+    "faults": [],
+    "fs-model": "ext4-ordered",
+    "log-limit": 1024,
+    "mounts": [],
+    "pause-points": true,
+    "preempt": "points",
+    "preempt-permille": 100,
+    "seed": 7,
+    "spin-probes": true,
+    "stall-ms": 10000,
+    "stdin": null,
+    "time-limit": 3600,
+    "timeout": 600,
+    "tmpfs-bytes": 268435456
+  },
+  "faults": {},
+  "host": {
+    "arch": "aarch64",
+    "cpu": "implementer 0x41 part 0xd0c",
+    "kernel": "7.0.0-1012-aws"
+  },
+  "inputs": [],
+  "patina": "0.21.0 0a27541d75e2df6f4b89f44355e3142876653824d74f10a0dfcd558caf2cbe86",
+  "program": {
+    "copied": false,
+    "dir": null,
+    "guest": "/bin/true",
+    "host": "/usr/bin/true",
+    "sha256": "a82c1b5fd392d72148d53992a860224ff3753cb2dc8909e9bdd1620e54ee1b88"
+  },
+  "schema": "patina.run/v1",
+  "seed": 7
+}

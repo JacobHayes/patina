@@ -75,6 +75,11 @@ pub enum Op {
         target: String,
         dst: String,
     },
+    /// A directory of symlinks `(name, target)` created in order via `symlinkat` on one dirfd.
+    SymlinkDir {
+        dst: String,
+        entries: Vec<(String, String)>,
+    },
     /// A read-only file, mode 0600, holding the contents of descriptor `FD_DATA0 + index`.
     Data {
         index: usize,
@@ -88,8 +93,10 @@ pub enum Op {
 /// What PID 1 does once the sandbox is made.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum After {
-    /// Execute `argv` (the supervisor).
+    /// Execute `argv` (external command).
     Exec,
+    /// Run Patina's supervisor (`sup::main`) directly in PID 1 without a second `execve`.
+    Sup { args: Vec<String> },
     /// A native run (`patina __native`): copy each `(hidden, dst)` tree, and `/.patina/in` into
     /// `work` if given, as the supervisor would, then execute `argv` itself.
     Native {
@@ -421,6 +428,7 @@ fn apply(op: &Op, data_seq: &mut usize, seen: &mut std::collections::HashSet<Str
         | Op::Tmpfs { dst, .. }
         | Op::Dir { dst }
         | Op::Symlink { dst, .. }
+        | Op::SymlinkDir { dst, .. }
         | Op::Data { dst, .. } => at(dst),
     };
     parents(&dst, 0o755, seen)?;
@@ -497,6 +505,35 @@ fn apply(op: &Op, data_seq: &mut usize, seen: &mut std::collections::HashSet<Str
         }
         Op::Dir { .. } => ensure_dir(&dst, 0o755),
         Op::Symlink { target, .. } => symlink(target, &dst),
+        Op::SymlinkDir { entries, .. } => {
+            ensure_dir(&dst, 0o755)?;
+            let dir_c = c(&dst);
+            let dirfd = unsafe {
+                libc::open(
+                    dir_c.as_ptr(),
+                    libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                )
+            };
+            sys(dirfd as _, &format!("open {dst}"))?;
+            let dirfd = unsafe { OwnedFd::from_raw_fd(dirfd) };
+            for (name, target) in entries {
+                let nc = c(name);
+                let tc = c(target);
+                let r = unsafe { libc::symlinkat(tc.as_ptr(), dirfd.as_raw_fd(), nc.as_ptr()) };
+                if r < 0 {
+                    let e = std::io::Error::last_os_error();
+                    if e.kind() == std::io::ErrorKind::AlreadyExists {
+                        let full = format!("{dst}/{name}");
+                        match std::fs::read_link(&full) {
+                            Ok(t) if t == Path::new(target) => continue,
+                            _ => return Err(format!("symlink {full}: exists")),
+                        }
+                    }
+                    return Err(format!("symlink {dst}/{name}: {e}"));
+                }
+            }
+            Ok(())
+        }
         Op::Data { index, .. } => {
             // On the setup tmpfs (outside the new root), bound read-only, then unlinked.
             let tmp = format!("/bindfile{}", *data_seq);
@@ -1262,6 +1299,34 @@ fn pid1(spec: &Spec, chan: OwnedFd) -> ! {
             }
         }
         After::Exec => {}
+        After::Sup { args } => {
+            if spec.machines.is_some()
+                && unsafe { libc::dup2(chan.as_raw_fd(), proto::layout::FD_MACHINES) }
+                    != proto::layout::FD_MACHINES
+            {
+                fail(last_err("dup2 the machines channel"));
+            }
+            drop(chan);
+            let pwd = c(&spec.chdir);
+            unsafe {
+                libc::clearenv();
+                libc::setenv(c"PWD".as_ptr(), pwd.as_ptr(), 1);
+            }
+            let code = match crate::sup::main(args) {
+                Ok(c) => {
+                    if c == ExitCode::SUCCESS {
+                        0
+                    } else {
+                        1
+                    }
+                }
+                Err(e) => {
+                    eprintln!("patina: {e}");
+                    2
+                }
+            };
+            unsafe { libc::_exit(code) };
+        }
         After::Native { copies, work } => {
             for (h, d) in copies {
                 if let Err(e) = crate::sup::inherit::copy_tree(Path::new(h), Path::new(d)) {

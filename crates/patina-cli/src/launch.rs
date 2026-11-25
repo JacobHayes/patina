@@ -183,6 +183,86 @@ pub struct Layout {
     pub machines: Option<sandbox::Machines>,
 }
 
+/// Cached contents of `/etc/ld.so.cache` (once per process).
+fn cached_ld_so_cache() -> Option<Vec<u8>> {
+    static CACHE: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| fs::read("/etc/ld.so.cache").ok())
+        .clone()
+}
+
+/// Cached sorted `(name, target)` entries of `/etc/alternatives`: cached in-process and on disk
+/// in `$XDG_CACHE_HOME/patina/alternatives.cache`, keyed by `/etc/alternatives`'s directory
+/// `(dev, ino, ctime, ctime_nsec, mtime, mtime_nsec)` so any change invalidates it immediately.
+fn cached_alternatives() -> Option<Vec<(String, String)>> {
+    use std::os::unix::fs::MetadataExt;
+    static ALT: std::sync::OnceLock<Option<Vec<(String, String)>>> = std::sync::OnceLock::new();
+    ALT.get_or_init(|| {
+        let md = fs::metadata("/etc/alternatives").ok()?;
+        let key = format!(
+            "{} {} {}.{} {}.{}",
+            md.dev(),
+            md.ino(),
+            md.ctime(),
+            md.ctime_nsec(),
+            md.mtime(),
+            md.mtime_nsec()
+        );
+        let cache_path = cache_dir().join("alternatives.cache");
+        if let Ok(text) = fs::read_to_string(&cache_path) {
+            let mut lines = text.lines();
+            if lines.next() == Some(key.as_str()) {
+                let mut entries = Vec::new();
+                let mut ok = true;
+                for line in lines {
+                    if let Some((n, t)) = line.split_once('\t') {
+                        entries.push((n.to_string(), t.to_string()));
+                    } else if !line.is_empty() {
+                        ok = false;
+                        break;
+                    }
+                }
+                if ok {
+                    return Some(entries);
+                }
+            }
+        }
+        let rd = fs::read_dir("/etc/alternatives").ok()?;
+        let mut links: Vec<(String, String)> = vec![];
+        for e in rd.flatten() {
+            if let (Ok(t), Some(n)) = (fs::read_link(e.path()), e.file_name().to_str()) {
+                links.push((n.to_string(), t.display().to_string()));
+            }
+        }
+        links.sort();
+        // Best-effort write through rename so concurrent readers never see a partial cache.
+        if links
+            .iter()
+            .all(|(n, t)| !n.contains('\t') && !n.contains('\n') && !t.contains('\n'))
+        {
+            let mut body = String::with_capacity(key.len() + 1 + links.len() * 48);
+            body.push_str(&key);
+            body.push('\n');
+            for (n, t) in &links {
+                body.push_str(n);
+                body.push('\t');
+                body.push_str(t);
+                body.push('\n');
+            }
+            let tmp = cache_dir().join(format!(".alternatives-{}", std::process::id()));
+            if fs::create_dir_all(cache_dir())
+                .and_then(|_| fs::write(&tmp, body))
+                .and_then(|_| fs::rename(&tmp, &cache_path))
+                .is_err()
+            {
+                let _ = fs::remove_file(&tmp);
+            }
+        }
+        Some(links)
+    })
+    .clone()
+}
+
 pub fn layout(o: &Opts, root: Option<&Path>) -> Res<Layout> {
     let c = &o.cfg;
     let work = c.disk_path();
@@ -236,27 +316,18 @@ pub fn layout(o: &Opts, root: Option<&Path>) -> Res<Layout> {
     // Generated /etc: the data files below, plus the host's ld.so.cache and localtime
     // naming UTC. The cache is a copy (a file on the sandbox's root tmpfs), not a bind.
     let mut etc = etc_files(work, &names);
-    if let Ok(cache) = fs::read("/etc/ld.so.cache") {
+    if let Some(cache) = cached_ld_so_cache() {
         etc.push(("/etc/ld.so.cache", cache));
     }
     ops.push(link("/usr/share/zoneinfo/UTC", "/etc/localtime"));
     // Debian's alternatives (`/usr/bin/awk` -> `/etc/alternatives/awk` -> gawk); without them
     // `awk` is "not found". Recreated as symlinks on the root tmpfs, in name order, instead of
     // a bind of the host directory.
-    if let Ok(rd) = fs::read_dir("/etc/alternatives") {
-        let mut links: Vec<(String, String)> = vec![];
-        for e in rd.flatten() {
-            if let (Ok(t), Some(n)) = (fs::read_link(e.path()), e.file_name().to_str()) {
-                links.push((n.to_string(), t.display().to_string()));
-            }
-        }
-        links.sort();
-        ops.push(Op::Dir {
+    if let Some(entries) = cached_alternatives() {
+        ops.push(Op::SymlinkDir {
             dst: "/etc/alternatives".into(),
+            entries,
         });
-        for (n, t) in links {
-            ops.push(link(&t, &format!("/etc/alternatives/{n}")));
-        }
     }
     // The program, the `:copy` mounts and the boot's /in are bound at a hidden place,
     // and the supervisor copies them into sandbox tmpfs (/guest, the mount points, /work)
@@ -724,12 +795,83 @@ pub fn not_in_sandbox(o: &Opts, missing: &[(u8, String)]) -> Vec<serde_json::Val
     out
 }
 
+/// Key identifying host preflight invariants that cannot change without a reboot, binary rebuild,
+/// UID/affinity change, or sysctl change. Returns `None` when test hooks require live probing.
+fn preflight_cache_key() -> Option<String> {
+    if std::env::var_os("PATINA_TEST_PAGE_SIZE").is_some()
+        || std::env::var_os("PATINA_NO_PREFLIGHT_CACHE").is_some()
+        || root_user().is_some()
+    {
+        return None;
+    }
+    let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    let build = crate::result::build().ok()?;
+    let uid = unsafe { libc::geteuid() };
+    let aff: Vec<String> = affinity().into_iter().map(|c| c.to_string()).collect();
+    let apparmor = fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let sve = fs::read_to_string("/proc/sys/abi/sve_default_vector_length")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    Some(format!(
+        "{}|{}|{}|{}|{}|{}",
+        boot_id.trim(),
+        build,
+        uid,
+        aff.join(","),
+        apparmor,
+        sve
+    ))
+}
+
+static SPIN_OK_CACHED: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(-1);
+
+fn cached_spin_ok() -> bool {
+    let v = SPIN_OK_CACHED.load(Relaxed);
+    if v >= 0 {
+        return v != 0;
+    }
+    let ok = crate::host::spin_ok();
+    SPIN_OK_CACHED.store(ok as i8, Relaxed);
+    ok
+}
+
 /// Can a run start here? Checked by every command before its first sandbox: the host meets
 /// this architecture's requirements (`host`, which `patina doctor` explains); as root, the
 /// sandbox's user namespace can be made and the host paths it binds can be read by the user it
 /// maps to; as another user, the host lets this executable make one (`userns_allowed`).
 pub fn preflight(o: &Opts) -> Res<()> {
-    crate::host::refusal(&crate::host::Facts::probe(None))?;
+    if let Some(key) = preflight_cache_key() {
+        let cache_path = cache_dir().join("preflight.ok");
+        if let Ok(text) = fs::read_to_string(&cache_path) {
+            if let Some((k, spin)) = text.trim().rsplit_once(' ') {
+                if k == key && (spin == "0" || spin == "1") {
+                    SPIN_OK_CACHED.store((spin == "1") as i8, Relaxed);
+                    return Ok(());
+                }
+            }
+        }
+        let facts = crate::host::Facts::probe(None);
+        crate::host::refusal(&facts)?;
+        userns_allowed()?;
+        let spin = facts.spin.is_ok();
+        SPIN_OK_CACHED.store(spin as i8, Relaxed);
+        let tmp = cache_dir().join(format!(".preflight-{}", std::process::id()));
+        if fs::create_dir_all(cache_dir())
+            .and_then(|_| fs::write(&tmp, format!("{key} {}\n", spin as u8)))
+            .and_then(|_| fs::rename(&tmp, &cache_path))
+            .is_err()
+        {
+            let _ = fs::remove_file(&tmp);
+        }
+        return Ok(());
+    }
+    let facts = crate::host::Facts::probe(None);
+    crate::host::refusal(&facts)?;
+    SPIN_OK_CACHED.store(facts.spin.is_ok() as i8, Relaxed);
     if root_user().is_none() {
         userns_allowed()?;
     }
@@ -929,7 +1071,6 @@ pub fn run_boot(
     let bdir = bdir.to_path_buf();
     fs::create_dir_all(&bdir).map_err(|e| format!("create {}: {e}", bdir.display()))?;
     let rt_file = rt_file()?;
-    let patina_file = File::open("/proc/self/exe").map_err(|e| format!("own executable: {e}"))?;
 
     let create = |name: &str| -> Res<File> {
         OpenOptions::new()
@@ -940,13 +1081,14 @@ pub fn run_boot(
             .map_err(|e| format!("create {name}: {e}"))
     };
     let log = create("boundary.log")?;
-    // Blocks allocated, as every later extension (`rt::log::grow`): a full filesystem fails
-    // here or at an extension, never as a store through the mapping.
-    let r = unsafe { libc::fallocate(log.as_raw_fd(), 0, 0, LOG_STEP as i64) };
+    // Blocks allocated eagerly (`LOG_INIT` first, growing geometrically in `rt::log::grow` and
+    // `sup::ensure_log` up to `LOG_STEP`): a full filesystem fails here or at an extension,
+    // never as a store through the mapping.
+    let r = unsafe { libc::fallocate(log.as_raw_fd(), 0, 0, LOG_INIT as i64) };
     if r != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EOPNOTSUPP) {
         return Err(format!("boundary.log: {}", std::io::Error::last_os_error()));
     }
-    log.set_len(LOG_STEP)
+    log.set_len(LOG_INIT)
         .map_err(|e| format!("boundary.log: {e}"))?;
     let opmeta = create("oplog.meta")?;
     let opdata = create("oplog.data")?;
@@ -1003,7 +1145,7 @@ pub fn run_boot(
     }
     // Where the host cannot make spin probes work they are off (`host::spin_probes`).
     if c.spin_probes {
-        cfg.sched |= if crate::host::spin_ok() {
+        cfg.sched |= if cached_spin_ok() {
             proto::ctl::SCHED_SPIN_PROBE
         } else {
             proto::ctl::SCHED_SPIN_HOST_OFF
@@ -1078,7 +1220,7 @@ pub fn run_boot(
         }
     }
     let ctl = unsafe { Ctl::at(ctl_ptr) };
-    ctl.log_cap.store(LOG_STEP, Relaxed);
+    ctl.log_cap.store(LOG_INIT, Relaxed);
     if start.k > 0 {
         ctl.seq.store(start.seq0, Relaxed);
         ctl.vclock_ns.store(start.vclock0, Relaxed);
@@ -1105,41 +1247,41 @@ pub fn run_boot(
         .map_err(|e| format!("pipe: {e}"))?;
     let (outcome_r, outcome_w) = unsafe { (File::from_raw_fd(p[0]), OwnedFd::from_raw_fd(p[1])) };
 
-    // The supervisor, executed by the sandbox's PID 1 from the descriptor placed at FD_PATINA.
+    // The supervisor runs directly in PID 1 after sandbox setup (no second exec of patina).
     let work = c.disk_path();
     let lay = layout(o, start.root)?;
-    let mut argv = vec![format!("/proc/self/fd/{FD_PATINA}"), "__sup".to_string()];
+    let mut sup_args: Vec<String> = vec![];
     for cp in &lay.copies {
-        argv.extend(["--copy".into(), cp.clone()]);
+        sup_args.extend(["--copy".into(), cp.clone()]);
     }
-    argv.extend(["--exe".into(), o.program.guest.clone()]);
+    sup_args.extend(["--exe".into(), o.program.guest.clone()]);
     for e in c.env.iter().chain(&c.main_env) {
-        argv.extend(["--env".into(), e.clone()]);
+        sup_args.extend(["--env".into(), e.clone()]);
     }
     // The `ready` probes, at the first boot only (`sup::ready`): each machine's number, then
     // its probe's words.
     if start.k == 0 {
         let probes = std::iter::once(&c.ready).chain(c.machines.iter().map(|m| &m.ready));
         for (k, w) in probes.enumerate().filter(|(_, w)| !w.is_empty()) {
-            argv.extend(["--ready".into(), k.to_string()]);
+            sup_args.extend(["--ready".into(), k.to_string()]);
             for x in w {
-                argv.extend(["--ready-arg".into(), x.clone()]);
+                sup_args.extend(["--ready-arg".into(), x.clone()]);
             }
         }
     }
     if !c.machines.is_empty() {
-        argv.push("--machines".into());
+        sup_args.push("--machines".into());
     }
-    argv.extend(["--env".into(), "PATINA_MACHINE=main".into()]);
-    argv.extend(["--env".into(), format!("PATINA_BOOT={}", start.k + 1)]);
-    argv.push("--".into());
+    sup_args.extend(["--env".into(), "PATINA_MACHINE=main".into()]);
+    sup_args.extend(["--env".into(), format!("PATINA_BOOT={}", start.k + 1)]);
+    sup_args.push("--".into());
     // argv[0]: a copied program is named by where it runs from.
-    argv.push(if o.program.copied {
+    sup_args.push(if o.program.copied {
         o.program.guest.clone()
     } else {
         c.cmd[0].clone()
     });
-    argv.extend(c.cmd[1..].iter().cloned());
+    sup_args.extend(c.cmd[1..].iter().cloned());
     // As root, the user namespace is joined from a descriptor at FD_USERNS.
     let userns = userns()?;
     let spec = sandbox::Spec {
@@ -1147,9 +1289,9 @@ pub fn run_boot(
         join_userns: userns.is_some(),
         chdir: work.into(),
         env: vec![],
-        argv,
+        argv: vec![],
         exe: None,
-        after: sandbox::After::Exec,
+        after: sandbox::After::Sup { args: sup_args },
         machines: lay.machines,
     };
     let spec_fd = sandbox::data_fd(&serde_json::to_vec(&spec).map_err(|e| e.to_string())?)?;
@@ -1167,7 +1309,6 @@ pub fn run_boot(
         (rt_file.as_raw_fd(), FD_RT),
         (outcome_w.as_raw_fd(), FD_OUTCOME),
         (export.as_raw_fd(), FD_EXPORT),
-        (patina_file.as_raw_fd(), FD_PATINA),
         (stdin_mem.as_raw_fd(), FD_STDIN),
         (stdout_mem.as_raw_fd(), FD_STDOUT),
         (stderr_mem.as_raw_fd(), FD_STDERR),
@@ -1541,9 +1682,12 @@ fn copy_stdio_part(
     let all = (st.st_size as u64).min(until);
     let from = from.min(all);
     let size = all - from;
+    if size == 0 {
+        return Ok(false);
+    }
     let end = from + size.min(max);
     let mut off = from;
-    let mut buf = vec![0u8; 1 << 20];
+    let mut buf = vec![0u8; ((end - from) as usize).min(1 << 20)];
     while off < end {
         let d = unsafe { libc::lseek(fd, off as i64, libc::SEEK_DATA) };
         if d < 0 {

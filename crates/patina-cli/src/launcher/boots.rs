@@ -162,6 +162,16 @@ fn machine_crashes(
 }
 
 pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<RunEnd> {
+    run_chain_with_planner(o, out, cpu, no_personality, None)
+}
+
+pub fn run_chain_with_planner(
+    o: &Opts,
+    out: &Path,
+    cpu: usize,
+    no_personality: bool,
+    shared_planner: Option<&crate::launcher::plans::Planner>,
+) -> Res<RunEnd> {
     let t0 = Instant::now();
     if out.join("result.json").exists() || out.join("boot-1").exists() {
         return Err(format!("{} already holds a run", out.display()));
@@ -203,7 +213,10 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
     let mut k = 0;
     let shm = shm_carrier()?;
     let mut plans = [0u64; proto::ctl::PLAN_FIELDS];
-    let planner = planner(o)?;
+    let planner = match shared_planner {
+        Some(p) => Some(std::sync::Arc::new(p.session())),
+        None => planner(o)?,
+    };
     let mut settle = [0u64; 2];
     let mut ready_ns = [0u64; proto::machine::MAX_MACHINES];
     loop {
@@ -392,10 +405,8 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
     }
 }
 
-/// With load-time points, the run's plans: made for the program and the libraries it names
-/// before the sandbox starts (on the CPUs this process may use, at most 8), the rest when the
-/// runtime asks (`launcher::plans`).
-fn planner(o: &Opts) -> Res<Option<std::sync::Arc<crate::launcher::plans::Planner>>> {
+/// Warm a shared `Planner` once for reuse across many runs (e.g. `patina batch`).
+pub fn warm_planner(o: &Opts) -> Res<Option<crate::launcher::plans::Planner>> {
     if !o.cfg.preempt.points() {
         return Ok(None);
     }
@@ -404,5 +415,12 @@ fn planner(o: &Opts) -> Res<Option<std::sync::Arc<crate::launcher::plans::Planne
         crate::rewrite::default_threads(),
     );
     crate::rewrite::cache::warm_all(&p, &o.program.host);
-    Ok(Some(std::sync::Arc::new(p)))
+    Ok(Some(p))
+}
+
+/// With load-time points, the run's plans: made for the program and the libraries it names
+/// before the sandbox starts (on the CPUs this process may use, at most 8), the rest when the
+/// runtime asks (`launcher::plans`).
+fn planner(o: &Opts) -> Res<Option<std::sync::Arc<crate::launcher::plans::Planner>>> {
+    Ok(warm_planner(o)?.map(std::sync::Arc::new))
 }

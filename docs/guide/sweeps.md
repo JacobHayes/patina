@@ -141,6 +141,28 @@ This is the triage loop for a corpus compared with a reference: a correct differ
 checker's table of expected differences (it answers 77, `expected: ...`), a known bug in the
 `--known` file, and a new bug is reproduced with its group's `rerun:` line.
 
+## Persistent worker pool: `patina batch`
+
+When an external driver (such as a fuzzer or property-based test loop) needs to run thousands of
+short runs with varying seeds or arguments, `patina batch` avoids per-invocation CLI startup,
+preflight, and rewrite-plan warming overhead. It starts `-j N` pinned worker threads once and
+reads one JSON request per line on standard input, writing one JSON response per line on standard
+output as each run completes:
+
+```text
+{"id": 1, "seed": 7, "args": ["arg1", "arg2"]}
+{"id": 2, "seed": 8, "args": ["arg1"], "out": "patina-out/keep-2"}
+```
+
+`id` defaults to the 0-based line index, `seed` defaults to `--seed`, `args` are appended to the
+command (or replace `{}` if present), and omitting `out` runs in an ephemeral temporary directory
+that is removed after the response is emitted.
+
+<!-- no-run batch-pool: example external driver feeding NDJSON lines -->
+```sh
+printf '{"id":1,"seed":1}\n{"id":2,"seed":2}\n' | patina batch -j 8 -- ./app
+```
+
 ## If a sweep finds nothing
 
 In order of what helps most: more seeds (a narrow window is one seed in thousands);
