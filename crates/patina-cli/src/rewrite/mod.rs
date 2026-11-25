@@ -489,8 +489,9 @@ mod x86_cov_tests {
     fn coverage_plan_for_current_binary_verifies_and_round_trips() {
         let exe = std::env::current_exe().expect("current_exe");
         let data = std::fs::read(&exe).expect("read current_exe");
+        let elf = elf::Elf::parse(&data).expect("parse current_exe");
         let par = par::Par::new(default_threads());
-        let plan = make_plan_with(&data, "test", true, &par).expect("coverage plan");
+        let plan = make_plan_with(&elf, "test", true, &par).expect("coverage plan");
         assert!(plan.coverage);
         assert!(!plan.sites.is_empty());
         let bad = verify_plan(&data, &plan, &par);

@@ -10,7 +10,7 @@ use super::verify::verify;
 
 /// The plan of the file `f` on one thread.
 fn make_plan(f: &[u8], build: &str) -> crate::cli::Res<Plan> {
-    super::x86::make_plan(&super::elf::Elf::parse(f)?, build, &Par::one())
+    super::x86::make_plan(&super::elf::Elf::parse(f)?, build, false, &Par::one())
 }
 
 const BASE: u64 = 0x40_1000;
