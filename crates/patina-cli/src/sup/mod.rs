@@ -371,9 +371,8 @@ impl Sup {
         self.running = Some(to);
         let s = unsafe { &mut *self.ctl.slot(to) };
         unsafe { std::ptr::write_volatile(&mut s.rep, Reply { ret, flags }) };
-        if s.go.swap(IPC_READY, AcqRel) == IPC_SLEEP {
-            futex_wake(&s.go as *const _ as *const u32, 1);
-        }
+        s.go.store(1, Release);
+        futex_wake(&s.go as *const _ as *const u32, 1);
     }
 
     /// `req`: the request being handled when this is checked (its thread is not parked).
@@ -1085,34 +1084,10 @@ impl Sup {
             now_ns(),
         );
         let mut planning = stall::Planning::default();
-        let spin_iters = self.ctl.ipc_spin.load(Relaxed).saturating_mul(3);
-        let sup_idle = if spin_iters > 0 { IPC_SPIN } else { IPC_SLEEP };
         loop {
-            let mut state = self.ctl.sup_word.load(Acquire);
-            if state == IPC_SPIN {
-                for _ in 0..spin_iters {
-                    std::hint::spin_loop();
-                    state = self.ctl.sup_word.load(Acquire);
-                    if state != IPC_SPIN {
-                        break;
-                    }
-                }
-            }
-            if state != IPC_READY {
-                if state == IPC_SLEEP
-                    || self
-                        .ctl
-                        .sup_word
-                        .compare_exchange(IPC_SPIN, IPC_SLEEP, AcqRel, Acquire)
-                        .is_ok()
-                {
-                    futex_wait_ms(
-                        &self.ctl.sup_word as *const _ as *const u32,
-                        IPC_SLEEP,
-                        slice,
-                    );
-                }
-                if self.ctl.sup_word.load(Acquire) != IPC_READY {
+            if self.ctl.sup_word.load(Acquire) == 0 {
+                futex_wait_ms(&self.ctl.sup_word as *const _ as *const u32, 0, slice);
+                if self.ctl.sup_word.load(Acquire) == 0 {
                     if let Some(pid) = self.unexpected_death() {
                         let name = proc::comm(pid);
                         let st = if pid == self.child {
@@ -1166,7 +1141,7 @@ impl Sup {
                     continue;
                 }
             }
-            self.ctl.sup_word.store(IPC_SLEEP, Relaxed);
+            self.ctl.sup_word.store(0, Relaxed);
             dog.note_request();
             let idx = self.ctl.pending_slot.load(Relaxed) as usize;
             let req = unsafe { std::ptr::read_volatile(&(*self.ctl.slot(idx)).req) };
@@ -1203,7 +1178,6 @@ impl Sup {
                 self.decide(req.op, idx, req.args, to as i64);
                 dog.note_request();
                 self.io.refresh(&self.sched, self.ctl);
-                self.ctl.sup_word.store(sup_idle, Relaxed);
                 self.reply(idx, to);
                 #[cfg(feature = "profile")]
                 unsafe {
@@ -1246,7 +1220,6 @@ impl Sup {
             };
             dog.note_request();
             self.io.refresh(&self.sched, self.ctl);
-            self.ctl.sup_word.store(sup_idle, Relaxed);
             self.reply(idx, to);
             #[cfg(feature = "profile")]
             unsafe {
@@ -1499,14 +1472,6 @@ pub fn main_with_sandbox_times(args: &[String], sandbox_times: [u64; 2]) -> Res<
     }
     sup.exe = main_cmd.exe.clone();
     sup.roots.fds = root::open_fds();
-    let sup_cpu = ctl.sup_cpu.load(Relaxed);
-    if sup_cpu != u64::MAX {
-        unsafe {
-            let mut set: libc::cpu_set_t = std::mem::zeroed();
-            libc::CPU_SET(sup_cpu as usize, &mut set);
-            let _ = libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
-        }
-    }
     let pid = sup.fork_root(&main_cmd);
     sup.child = pid;
     sup.pidfd = match pidfd_open(pid) {

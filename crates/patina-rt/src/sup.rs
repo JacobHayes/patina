@@ -3,12 +3,9 @@
 use crate::raw::*;
 use crate::state::{ctl, thread};
 use core::sync::atomic::Ordering::*;
-use proto::ctl::{
-    futex_bloom_mask, Op, Reply, Request, FAST_BASE, FAST_SOLO, IPC_READY, IPC_SLEEP, IPC_SPIN,
-    YIELD_OTHER,
-};
+use proto::ctl::{futex_bloom_mask, Op, Reply, Request, FAST_BASE, FAST_SOLO, YIELD_OTHER};
 
-unsafe fn post(op: Op, args: [u64; 6], go_init: u32) -> *mut proto::Slot {
+unsafe fn post(op: Op, args: [u64; 6]) -> *mut proto::Slot {
     let ts = thread();
     let c = ctl();
     let slot = c.slot(ts.slot as usize);
@@ -20,11 +17,10 @@ unsafe fn post(op: Op, args: [u64; 6], go_init: u32) -> *mut proto::Slot {
             args,
         },
     );
-    (*slot).go.store(go_init, Relaxed);
+    (*slot).go.store(0, Relaxed);
     c.pending_slot.store(ts.slot, Relaxed);
-    if c.sup_word.swap(IPC_READY, AcqRel) == IPC_SLEEP {
-        futex_wake(&c.sup_word as *const _ as *const u32, 1);
-    }
+    c.sup_word.store(1, Release);
+    futex_wake(&c.sup_word as *const _ as *const u32, 1);
     slot
 }
 
@@ -207,47 +203,10 @@ fn debugger_signals(set: u64) -> u64 {
 
 fn call_sup_raw(op: Op, args: [u64; 6]) -> Reply {
     let t0 = crate::profile::now_ns();
-    // Only spin on the guest CPU when this request will likely return the turn to the same
-    // thread. Blocking ops (or Yield with another runnable thread) yield the guest CPU right
-    // away so the next guest thread runs without contention.
-    let may_switch = matches!(
-        op,
-        Op::FutexWait
-            | Op::Sleep
-            | Op::Park
-            | Op::WaitPark
-            | Op::SigWait
-            | Op::SigSuspend
-            | Op::VforkStart
-    ) || (op == Op::Yield && ctl().view.runnable.load(Relaxed) > 1);
-    let spin_iters = if may_switch {
-        0
-    } else {
-        ctl().ipc_spin.load(Relaxed)
-    };
-    let go_init = if spin_iters > 0 { IPC_SPIN } else { IPC_SLEEP };
     let rep = unsafe {
-        let slot = post(op, args, go_init);
-        let mut state = (*slot).go.load(Acquire);
-        if state == IPC_SPIN {
-            for _ in 0..spin_iters {
-                core::hint::spin_loop();
-                state = (*slot).go.load(Acquire);
-                if state != IPC_SPIN {
-                    break;
-                }
-            }
-        }
-        while state != IPC_READY {
-            if state == IPC_SLEEP
-                || (*slot)
-                    .go
-                    .compare_exchange(IPC_SPIN, IPC_SLEEP, AcqRel, Acquire)
-                    .is_ok()
-            {
-                futex_wait(&(*slot).go as *const _ as *const u32, IPC_SLEEP);
-            }
-            state = (*slot).go.load(Acquire);
+        let slot = post(op, args);
+        while (*slot).go.load(Acquire) == 0 {
+            futex_wait(&(*slot).go as *const _ as *const u32, 0);
         }
         core::ptr::read_volatile(&(*slot).rep)
     };
@@ -258,7 +217,7 @@ fn call_sup_raw(op: Op, args: [u64; 6]) -> Reply {
 /// Send a request the supervisor never answers (exit); the caller exits right after.
 pub fn call_sup_noreply(op: Op, args: [u64; 6]) {
     unsafe {
-        post(op, args, IPC_SLEEP);
+        post(op, args);
     }
 }
 
