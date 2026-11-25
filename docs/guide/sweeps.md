@@ -145,9 +145,12 @@ checker's table of expected differences (it answers 77, `expected: ...`), a know
 
 When an external driver (such as a fuzzer or property-based test loop) needs to run thousands of
 short runs with varying seeds or arguments, `patina batch` avoids per-invocation CLI startup,
-preflight, and rewrite-plan warming overhead. It starts `-j N` pinned worker threads once and
-reads one JSON request per line on standard input, writing one JSON response per line on standard
-output as each run completes:
+preflight, rewrite-plan warming, and static sandbox setup overhead. It starts `-j N` pinned worker
+threads once, each reusing a persistent sandbox keeper whose immutable rootfs and outer namespaces
+are built once while every run executes inside a fresh PID, mount, and IPC namespace with fresh
+writable tmpfs mounts and a fresh `execve` (automatically respawning the keeper if a run writes
+outside `/work`, `/tmp`, or `/guest`). It reads one JSON request per line on standard input,
+writing one JSON response per line on standard output as each run completes:
 
 ```text
 {"id": 1, "seed": 7, "args": ["arg1", "arg2"]}

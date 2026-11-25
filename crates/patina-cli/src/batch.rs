@@ -139,9 +139,12 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         let out_lock = Arc::clone(&stdout);
         let tmp_root = Arc::clone(&tmp_root);
         let bp = bp.clone();
+        let worker_tmp = tmp_root.join(format!("w-{worker_idx}"));
+        let _ = fs::create_dir_all(&worker_tmp);
         let h = std::thread::Builder::new()
             .name(format!("patina-batch-{worker_idx}"))
             .spawn(move || {
+                let mut worker: Option<crate::sandbox::SandboxWorker> = None;
                 while let Some(item) = q.pop() {
                     let id = item.req.id.unwrap_or(item.seq);
                     let seed = item.req.seed.unwrap_or(base.cfg.seed);
@@ -154,8 +157,9 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                         cpu,
                         &base,
                         planner.as_ref().as_ref(),
-                        &tmp_root,
+                        &worker_tmp,
                         bp.as_deref(),
+                        &mut worker,
                     );
                     let mut w = out_lock.lock().unwrap();
                     let _ = serde_json::to_writer(&mut *w, &resp);
@@ -224,6 +228,7 @@ fn run_item(
     planner: Option<&crate::launcher::plans::Planner>,
     tmp_root: &std::path::Path,
     bp: Option<&crate::profile::BatchProfile>,
+    worker: &mut Option<crate::sandbox::SandboxWorker>,
 ) -> serde_json::Value {
     let t_job_start = crate::profile::stamp();
     let opts = match base.for_batch(seed, &req.args) {
@@ -273,8 +278,13 @@ fn run_item(
         }
     }
 
-    let mut end = match crate::launcher::boots::run_chain_with_planner(
-        &opts, &run_dir, cpu, false, planner,
+    let mut end = match crate::launcher::boots::run_chain_with_worker(
+        &opts,
+        &run_dir,
+        cpu,
+        false,
+        planner,
+        Some(worker),
     ) {
         Ok(end) => end,
         Err(e) => {

@@ -27,6 +27,8 @@ pub const MAX_DATA: usize = 8;
 pub const FD_USERNS: i32 = 3018;
 /// Launcher to keeper: the `Spec`, as JSON.
 pub const FD_SPEC: i32 = 3019;
+/// Launcher to persistent sandbox worker (`__sandbox-worker`): `SOCK_SEQPACKET` job channel.
+pub const FD_WORKER_CHAN: i32 = 3025;
 /// Launcher to keeper, in a run with machines: machine `k`'s stdin, stdout and stderr memfds at
 /// `FD_MACHINE_STDIO0 + 3 * (k - 1)` and the two after it (above every number the supervisor
 /// keeps, so its `close_inherited` closes them).
@@ -36,7 +38,7 @@ const _: () = {
     assert!(FD_PLAN < FD_DATA0);
     assert!(FD_DATA0 + MAX_DATA as i32 <= FD_USERNS);
     assert!(FD_USERNS < FD_SPEC && FD_SPEC < FD_STDIN);
-    assert!(FD_MACHINES < FD_MACHINE_STDIO0);
+    assert!(FD_MACHINES < FD_WORKER_CHAN && FD_WORKER_CHAN < FD_MACHINE_STDIO0);
     // The keeper's descriptors are closed before the supervisor makes the shadow stores.
     assert!(FD_MACHINE_STDIO0 + 3 * (proto::machine::MAX_MACHINES as i32 - 1) < FD_SHADOWS);
     assert!(FD_MACHINE_STDIO0 + 3 * (proto::machine::MAX_MACHINES as i32 - 1) + 2 < FD_PROBE_MEM);
@@ -165,11 +167,19 @@ pub fn command(
     place: Vec<(i32, i32)>,
     first: impl Fn() -> std::io::Result<()> + Send + Sync + 'static,
 ) -> std::process::Command {
+    command_with_subcmd("__sandbox", place, first)
+}
+
+fn command_with_subcmd(
+    subcmd: &str,
+    place: Vec<(i32, i32)>,
+    first: impl Fn() -> std::io::Result<()> + Send + Sync + 'static,
+) -> std::process::Command {
     use std::os::unix::process::CommandExt;
     assert!(place.len() <= 72);
     let mut cmd = std::process::Command::new("/proc/self/exe");
     cmd.arg0("patina")
-        .args(["__sandbox", "--parent", &std::process::id().to_string()]);
+        .args([subcmd, "--parent", &std::process::id().to_string()]);
     unsafe {
         cmd.pre_exec(move || {
             first()?;
@@ -535,7 +545,8 @@ fn apply(op: &Op, data_seq: &mut usize, seen: &mut std::collections::HashSet<Str
             Ok(())
         }
         Op::Data { index, .. } => {
-            // On the setup tmpfs (outside the new root), bound read-only, then unlinked.
+            // On the setup tmpfs (outside the new root), bound read-only; the setup tmpfs is
+            // detached at pivot_root so `/bindfile{seq}` is unreachable while keeping st_nlink=1.
             let tmp = format!("/bindfile{}", *data_seq);
             *data_seq += 1;
             let data = read_fd(FD_DATA0 + *index as i32)?;
@@ -550,8 +561,7 @@ fn apply(op: &Op, data_seq: &mut usize, seen: &mut std::collections::HashSet<Str
                 std::io::Write::write_all(&mut f, &data).map_err(|e| format!("{tmp}: {e}"))?;
             }
             ensure_file(&dst, 0o444)?;
-            bind(&tmp, &dst, false, false)?;
-            std::fs::remove_file(&tmp).map_err(|e| format!("{tmp}: {e}"))
+            bind(&tmp, &dst, false, false)
         }
     }
 }
@@ -1913,6 +1923,968 @@ fn machine_main(
         );
     }
     fail(last_err("execute the runtime"))
+}
+
+/// Maximum JSON payload size for a persistent sandbox worker job request.
+pub const WORKER_REQ_MAX: usize = 128 * 1024;
+
+/// Static layout sent once to `patina __sandbox-worker` at startup.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct WorkerSpec {
+    ops: Vec<Op>,
+    join_userns: bool,
+    /// Tmpfs mount destinations whose size comes from per-job `main_disk_bytes` (main disk & `/tmp`).
+    main_tmpfs: Vec<String>,
+}
+
+/// Per-job request sent over `FD_WORKER_CHAN` alongside the job's descriptors.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct JobReq {
+    pub sup_args: Vec<String>,
+    pub chdir: String,
+    pub main_disk_bytes: u64,
+    pub has_plan: bool,
+}
+
+const WORKER_FD_TARGETS: [i32; 10] = [
+    proto::layout::FD_CTL,
+    proto::layout::FD_LOG,
+    proto::layout::FD_OPLOG_META,
+    proto::layout::FD_OPLOG_DATA,
+    proto::layout::FD_OUTCOME,
+    proto::layout::FD_EXPORT,
+    proto::layout::FD_STDIN,
+    proto::layout::FD_STDOUT,
+    proto::layout::FD_STDERR,
+    proto::layout::FD_SHM,
+];
+
+/// A persistent sandbox worker process (`patina __sandbox-worker`) attached to one batch worker
+/// thread. It enters the outer user, network, UTS and cgroup namespaces and builds the immutable
+/// rootfs and read-only bind staging tree once; each job runs in a fresh `CLONE_NEWPID |
+/// CLONE_NEWNS | CLONE_NEWIPC` child with fresh writable tmpfs mounts, a fresh `/proc`, and a
+/// fresh `execve` of the guest runtime.
+pub struct SandboxWorker {
+    chan: Option<OwnedFd>,
+    child: std::process::Child,
+    copies: Vec<String>,
+}
+
+impl SandboxWorker {
+    pub fn copies(&self) -> &[String] {
+        &self.copies
+    }
+
+    pub fn start(
+        ops: &[Op],
+        data: &[Vec<u8>],
+        copies: Vec<String>,
+        work: &str,
+        rt_fd: RawFd,
+        userns: Option<i32>,
+        cpu: usize,
+    ) -> Res<Self> {
+        let (host_chan, worker_chan) = seqpacket()?;
+        let spec = WorkerSpec {
+            ops: ops.to_vec(),
+            join_userns: userns.is_some(),
+            main_tmpfs: vec![work.into(), "/tmp".into()],
+        };
+        let spec_fd = data_fd(&serde_json::to_vec(&spec).map_err(|e| e.to_string())?)?;
+        let mut etc_fds = Vec::with_capacity(data.len());
+        assert!(data.len() <= MAX_DATA);
+        for d in data {
+            etc_fds.push(data_fd(d)?);
+        }
+        let mut place = vec![
+            (worker_chan.as_raw_fd(), FD_WORKER_CHAN),
+            (spec_fd.as_raw_fd(), FD_SPEC),
+            (rt_fd, proto::layout::FD_RT),
+        ];
+        for (i, f) in etc_fds.iter().enumerate() {
+            place.push((f.as_raw_fd(), FD_DATA0 + i as i32));
+        }
+        if let Some(fd) = userns {
+            place.push((fd, FD_USERNS));
+        }
+        let mut cmd = command_with_subcmd("__sandbox-worker", place, move || unsafe {
+            if libc::personality(libc::ADDR_NO_RANDOMIZE as libc::c_ulong) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let mut set: libc::cpu_set_t = std::mem::zeroed();
+            libc::CPU_SET(cpu, &mut set);
+            if libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut child = cmd.spawn().map_err(|e| format!("sandbox worker: {e}"))?;
+        drop(worker_chan);
+        drop(spec_fd);
+        drop(etc_fds);
+
+        let mut buf = [0u8; 4096];
+        let n = loop {
+            let r =
+                unsafe { libc::recv(host_chan.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), 0) };
+            if r < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            break r;
+        };
+        if n == 2 && &buf[..2] == b"ok" {
+            return Ok(SandboxWorker {
+                chan: Some(host_chan),
+                child,
+                copies,
+            });
+        }
+        drop(host_chan);
+        let _ = child.kill();
+        let _ = child.wait();
+        if n > 0 {
+            Err(format!(
+                "sandbox worker startup: {}",
+                String::from_utf8_lossy(&buf[..n as usize])
+            ))
+        } else {
+            Err("sandbox worker exited during startup".into())
+        }
+    }
+
+    pub fn dispatch(&self, req_json: &[u8], fds: &[RawFd]) -> Res<()> {
+        let fd = self
+            .chan
+            .as_ref()
+            .ok_or_else(|| "sandbox worker channel closed".to_string())?
+            .as_raw_fd();
+        send_with(fd, req_json, fds)
+    }
+
+    /// Ask the keeper to `SIGKILL` the running job's PID 1 (and therefore every process in its
+    /// PID namespace) and wait for it to be reaped before replying.
+    pub fn cancel(&self) {
+        if let Some(ch) = &self.chan {
+            unsafe {
+                libc::send(ch.as_raw_fd(), b"K".as_ptr().cast(), 1, libc::MSG_NOSIGNAL);
+            }
+        }
+    }
+
+    /// Wait for the keeper to reap the job's PID 1 and report `(exit_code, dirty)`.
+    pub fn finish(&self) -> Res<(u8, bool)> {
+        let fd = self
+            .chan
+            .as_ref()
+            .ok_or_else(|| "sandbox worker channel closed".to_string())?
+            .as_raw_fd();
+        let mut buf = [0u8; 2];
+        loop {
+            let n = unsafe { libc::recv(fd, buf.as_mut_ptr().cast(), buf.len(), 0) };
+            if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            if n == 2 {
+                return Ok((buf[0], buf[1] != 0));
+            }
+            if n == 0 {
+                return Err("sandbox worker exited unexpectedly".into());
+            }
+            return Err(last_err("sandbox worker recv"));
+        }
+    }
+}
+
+impl Drop for SandboxWorker {
+    fn drop(&mut self) {
+        // Closing the channel signals the keeper to kill any active job child and exit cleanly.
+        self.chan.take();
+        for _ in 0..250 {
+            match self.child.try_wait() {
+                Ok(Some(_)) | Err(_) => return,
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(2)),
+            }
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+enum PerJobOp {
+    Proc {
+        dst: String,
+    },
+    Tmpfs {
+        dst: String,
+        size: u64,
+        main_sized: bool,
+        needs_create: bool,
+    },
+    StageBind {
+        stage_path: String,
+        dst: String,
+        is_dir: bool,
+        needs_create: bool,
+    },
+    Other(Op),
+}
+
+enum StageBindInit {
+    Host {
+        old_src: String,
+        is_dir: bool,
+        rw: bool,
+        dev: bool,
+    },
+    DataFile {
+        tmp_path: String,
+    },
+}
+
+struct WatchedDir {
+    path: CString,
+    mtime: libc::time_t,
+    mtime_nsec: i64,
+    ctime: libc::time_t,
+    ctime_nsec: i64,
+    nlink: u64,
+    mode: libc::mode_t,
+}
+
+fn under_any(dst: &str, prefixes: &[String]) -> bool {
+    prefixes
+        .iter()
+        .any(|p| dst == p || dst.strip_prefix(p).is_some_and(|r| r.starts_with('/')))
+}
+
+fn make_guests_userns(proc_base: &str) -> Res<OwnedFd> {
+    let (rd, wr) = seqpacket()?;
+    let (err_r, err_w) = pipe()?;
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        return Err(last_err("fork guests userns"));
+    }
+    if pid == 0 {
+        drop(rd);
+        drop(err_r);
+        let r = (|| -> Res<()> {
+            sys(
+                unsafe { libc::unshare(libc::CLONE_NEWUSER) } as _,
+                "unshare the guests' user namespace",
+            )?;
+            drop_bounding()?;
+            sys(
+                unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0) } as _,
+                "dumpable",
+            )?;
+            write_file(&format!("{proc_base}/self/uid_map"), "1000 0 1\n")?;
+            write_file(&format!("{proc_base}/self/gid_map"), "1000 0 1\n")?;
+            let ns = unsafe {
+                libc::open(
+                    c(&format!("{proc_base}/self/ns/user")).as_ptr(),
+                    libc::O_RDONLY | libc::O_CLOEXEC,
+                )
+            };
+            sys(ns as _, "open the guests' user namespace")?;
+            let res = send_fd(wr.as_raw_fd(), ns);
+            unsafe { libc::close(ns) };
+            res
+        })();
+        if let Err(e) = r {
+            let _ = crate::sys::write_fd(err_w.as_raw_fd(), e.as_bytes());
+            unsafe { libc::_exit(1) };
+        }
+        unsafe { libc::_exit(0) };
+    }
+    drop(wr);
+    drop(err_w);
+    let mut err = vec![];
+    let _ = std::io::Read::read_to_end(&mut std::fs::File::from(err_r), &mut err);
+    let st = wait_pid(pid);
+    if !err.is_empty() || st != 0 {
+        return Err(format!("guests userns: {}", String::from_utf8_lossy(&err)));
+    }
+    recv_fd(rd.as_raw_fd()).ok_or_else(|| "guests userns: no descriptor sent".into())
+}
+
+fn lstat_raw(path: &CString) -> Res<libc::stat> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    sys(
+        unsafe { libc::lstat(path.as_ptr(), &mut st) } as _,
+        &format!("lstat {}", path.to_string_lossy()),
+    )?;
+    Ok(st)
+}
+
+/// Stamp sentinel timestamps on every directory belonging to `/newroot` or `/newroot/dev` (without
+/// descending into host binds like `/newroot/usr` or `devpts`) and record their baseline metadata
+/// so any mutation to `/` or `/dev` (including `/dev/shm`) marks the worker dirty.
+fn collect_watch_dirs() -> Res<Vec<WatchedDir>> {
+    let newroot_dev = lstat_raw(&c(NEW))?.st_dev;
+    let dev_dev = lstat_raw(&c(&format!("{NEW}/dev"))).ok().map(|s| s.st_dev);
+    let sentinel = libc::timespec {
+        tv_sec: 1,
+        tv_nsec: 123_456_789,
+    };
+    let mut out = vec![];
+    let mut stack = vec![std::path::PathBuf::from(NEW)];
+    while let Some(dir) = stack.pop() {
+        let cs = c(&dir.display().to_string());
+        let st = lstat_raw(&cs)?;
+        if (st.st_mode & libc::S_IFMT) != libc::S_IFDIR {
+            continue;
+        }
+        if st.st_dev != newroot_dev && Some(st.st_dev) != dev_dev {
+            continue;
+        }
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                if let Ok(ft) = e.file_type() {
+                    if ft.is_dir() {
+                        stack.push(e.path());
+                    }
+                }
+            }
+        }
+        sys(
+            unsafe {
+                libc::utimensat(
+                    libc::AT_FDCWD,
+                    cs.as_ptr(),
+                    [sentinel, sentinel].as_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            } as _,
+            &format!("utimensat {}", dir.display()),
+        )?;
+        let st = lstat_raw(&cs)?;
+        out.push(WatchedDir {
+            path: cs,
+            mtime: st.st_mtime,
+            mtime_nsec: st.st_mtime_nsec,
+            ctime: st.st_ctime,
+            ctime_nsec: st.st_ctime_nsec,
+            #[allow(clippy::unnecessary_cast)]
+            nlink: st.st_nlink as u64,
+            mode: st.st_mode,
+        });
+    }
+    Ok(out)
+}
+
+fn dirs_dirty(watch: &[WatchedDir]) -> bool {
+    for w in watch {
+        let Ok(st) = lstat_raw(&w.path) else {
+            return true;
+        };
+        #[allow(clippy::unnecessary_cast)]
+        let nlink = st.st_nlink as u64;
+        if st.st_mtime != w.mtime
+            || st.st_mtime_nsec != w.mtime_nsec
+            || st.st_ctime != w.ctime
+            || st.st_ctime_nsec != w.ctime_nsec
+            || nlink != w.nlink
+            || st.st_mode != w.mode
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Set up the reusable namespaces, `/newroot`, `/stage`, `guests_userns`, and watched directory
+/// baselines once at `patina __sandbox-worker` startup.
+fn worker_setup(spec: &WorkerSpec, parent: i32) -> Res<(Vec<PerJobOp>, OwnedFd, Vec<WatchedDir>)> {
+    if spec.join_userns {
+        join_userns(FD_USERNS)?;
+    } else {
+        new_userns()?;
+    }
+    die_with_parent(|| unsafe { libc::getppid() } == parent);
+    // Notice: no CLONE_NEWPID here, so the keeper can clone(CLONE_NEWPID | ...) a fresh PID 1
+    // per job while reusing the outer user, net, UTS and cgroup namespaces and the rootfs tree.
+    let mut flags =
+        libc::CLONE_NEWNS | libc::CLONE_NEWNET | libc::CLONE_NEWIPC | libc::CLONE_NEWUTS;
+    if Path::new("/proc/self/ns/cgroup").exists() {
+        flags |= libc::CLONE_NEWCGROUP;
+    }
+    sys(unsafe { libc::unshare(flags) } as _, "unshare namespaces")?;
+    chdir("/")?;
+    unsafe { libc::umask(0) };
+    loopback()?;
+
+    // Canonicalize bind sources as the host resolves them, before pivot_root.
+    let mut ops = spec.ops.clone();
+    for op in &mut ops {
+        if let Op::Bind { src, .. } = op {
+            *src = std::fs::canonicalize(&*src)
+                .map_err(|e| format!("{src}: {e}"))?
+                .display()
+                .to_string();
+        }
+    }
+
+    mount(None, "/", None, libc::MS_REC | libc::MS_SLAVE, None)?;
+    mount(
+        Some("tmpfs"),
+        "/tmp",
+        Some("tmpfs"),
+        libc::MS_NODEV | libc::MS_NOSUID,
+        None,
+    )?;
+    chdir("/tmp")?;
+    mkdir("newroot", 0o755)?;
+    mount(
+        Some("newroot"),
+        "newroot",
+        None,
+        libc::MS_BIND | libc::MS_REC,
+        None,
+    )?;
+    mkdir("oldroot", 0o755)?;
+    pivot_root("/tmp", "oldroot")?;
+    chdir("/")?;
+
+    let split = ops
+        .iter()
+        .position(|op| matches!(op, Op::Proc { .. }))
+        .ok_or_else(|| "sandbox worker: layout has no Op::Proc".to_string())?;
+
+    let (mut data_seq, mut seen) = (0usize, std::collections::HashSet::<String>::new());
+    // Phase 1 (before Op::Proc): applied directly onto /newroot once.
+    for op in &ops[..split] {
+        apply(op, &mut data_seq, &mut seen)?;
+    }
+
+    // Phase 2 Pass 1: create all /newroot entries and /bindfile{seq} files in the exact same
+    // order as one-shot `setup()` BEFORE creating `/stage`, so every inode number on `/newroot`
+    // and every `Op::Data` inode is bit-for-bit identical to `patina run`.
+    let mut phase2_mounts: Vec<String> = vec![];
+    let mut stage_inits: Vec<StageBindInit> = vec![];
+    let mut per_job: Vec<PerJobOp> = vec![];
+    for op in &ops[split..] {
+        match op {
+            Op::Hostname { name } => {
+                let n = c(name);
+                sys(
+                    unsafe { libc::sethostname(n.as_ptr(), name.len()) } as _,
+                    "sethostname",
+                )?;
+            }
+            Op::Dev { .. } => {
+                return Err("sandbox worker: Op::Dev after Op::Proc is unsupported".into());
+            }
+            Op::Proc { dst } => {
+                let new_dst = format!("{NEW}{dst}");
+                parents(&new_dst, 0o755, &mut seen)?;
+                ensure_dir(&new_dst, 0o755)?;
+                let under = format!("{new_dst}/");
+                seen.retain(|s| s.as_str() != new_dst && !s.starts_with(&under));
+                phase2_mounts.push(dst.clone());
+                per_job.push(PerJobOp::Proc { dst: dst.clone() });
+            }
+            Op::Tmpfs { dst, size } => {
+                let needs_create = under_any(dst, &phase2_mounts);
+                let new_dst = format!("{NEW}{dst}");
+                if !needs_create {
+                    parents(&new_dst, 0o755, &mut seen)?;
+                    ensure_dir(&new_dst, 0o755)?;
+                }
+                let under = format!("{new_dst}/");
+                seen.retain(|s| s.as_str() != new_dst && !s.starts_with(&under));
+                phase2_mounts.push(dst.clone());
+                let main_sized = spec.main_tmpfs.iter().any(|p| p == dst);
+                per_job.push(PerJobOp::Tmpfs {
+                    dst: dst.clone(),
+                    size: *size,
+                    main_sized,
+                    needs_create,
+                });
+            }
+            Op::Bind { src, dst, rw, dev } => {
+                let old_src = format!("{OLD}{src}");
+                let md =
+                    std::fs::metadata(&old_src).map_err(|e| format!("bind source {src}: {e}"))?;
+                let is_dir = md.is_dir();
+                let needs_create = under_any(dst, &phase2_mounts);
+                let new_dst = format!("{NEW}{dst}");
+                if !needs_create {
+                    parents(&new_dst, 0o755, &mut seen)?;
+                    if is_dir {
+                        ensure_dir(&new_dst, 0o755)?;
+                    } else {
+                        ensure_file(&new_dst, 0o444)?;
+                    }
+                }
+                let under = format!("{new_dst}/");
+                seen.retain(|s| s.as_str() != new_dst && !s.starts_with(&under));
+                phase2_mounts.push(dst.clone());
+                let idx = stage_inits.len();
+                stage_inits.push(StageBindInit::Host {
+                    old_src,
+                    is_dir,
+                    rw: *rw,
+                    dev: *dev,
+                });
+                per_job.push(PerJobOp::StageBind {
+                    stage_path: format!("/stage/m{idx}"),
+                    dst: dst.clone(),
+                    is_dir,
+                    needs_create,
+                });
+            }
+            Op::Data { index, dst } => {
+                let tmp_path = format!("/bindfile{data_seq}");
+                data_seq += 1;
+                let data = read_fd(FD_DATA0 + *index as i32)?;
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    let mut f = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .mode(0o600)
+                        .open(&tmp_path)
+                        .map_err(|e| format!("{tmp_path}: {e}"))?;
+                    std::io::Write::write_all(&mut f, &data)
+                        .map_err(|e| format!("{tmp_path}: {e}"))?;
+                }
+                let needs_create = under_any(dst, &phase2_mounts);
+                let new_dst = format!("{NEW}{dst}");
+                if !needs_create {
+                    parents(&new_dst, 0o755, &mut seen)?;
+                    ensure_file(&new_dst, 0o444)?;
+                }
+                phase2_mounts.push(dst.clone());
+                let idx = stage_inits.len();
+                stage_inits.push(StageBindInit::DataFile { tmp_path });
+                per_job.push(PerJobOp::StageBind {
+                    stage_path: format!("/stage/m{idx}"),
+                    dst: dst.clone(),
+                    is_dir: false,
+                    needs_create,
+                });
+            }
+            Op::Dir { dst } | Op::Symlink { dst, .. } | Op::SymlinkDir { dst, .. } => {
+                if under_any(dst, &phase2_mounts) {
+                    per_job.push(PerJobOp::Other(op.clone()));
+                } else {
+                    apply(op, &mut data_seq, &mut seen)?;
+                }
+            }
+        }
+    }
+
+    // Phase 2 Pass 2: stage `/oldroot/proc` (so per-job `mount("proc")` passes `fs_fully_visible`)
+    // and pre-bind every Phase-2 host bind and `Op::Data` file under `/stage` (outside `/newroot`).
+    mkdir("/stage", 0o755)?;
+    mkdir("/stage/proc", 0o755)?;
+    mount(
+        Some("/oldroot/proc"),
+        "/stage/proc",
+        None,
+        libc::MS_BIND | libc::MS_REC,
+        None,
+    )?;
+    for (idx, item) in stage_inits.into_iter().enumerate() {
+        let stage_path = format!("/stage/m{idx}");
+        match item {
+            StageBindInit::Host {
+                old_src,
+                is_dir,
+                rw,
+                dev,
+            } => {
+                if is_dir {
+                    mkdir(&stage_path, 0o755)?;
+                } else {
+                    ensure_file(&stage_path, 0o444)?;
+                }
+                bind(&old_src, &stage_path, rw, dev)?;
+            }
+            StageBindInit::DataFile { tmp_path } => {
+                ensure_file(&stage_path, 0o444)?;
+                bind(&tmp_path, &stage_path, false, false)?;
+            }
+        }
+    }
+
+    // Detach the host tree once; keep `/stage/proc` and `/stage/m*` on the setup tmpfs until
+    // each job's child pivots into `/newroot` and detaches the setup tmpfs in one call.
+    mount(
+        Some("oldroot"),
+        "oldroot",
+        None,
+        libc::MS_REC | libc::MS_PRIVATE,
+        None,
+    )?;
+    umount("oldroot")?;
+    mount(None, "/", None, libc::MS_REC | libc::MS_PRIVATE, None)?;
+    for fd in FD_DATA0..FD_DATA0 + MAX_DATA as i32 {
+        unsafe { libc::close(fd) };
+    }
+
+    let guests_userns = make_guests_userns("/stage/proc")?;
+    let watch_dirs = collect_watch_dirs()?;
+    Ok((per_job, guests_userns, watch_dirs))
+}
+
+fn worker_pid1(
+    per_job: &[PerJobOp],
+    guests_userns: RawFd,
+    alive_r_fd: RawFd,
+    req: JobReq,
+    job_fds: Vec<OwnedFd>,
+) -> ! {
+    use std::os::fd::IntoRawFd;
+    let fail = |e: String| -> ! {
+        eprintln!("patina sandbox: {e}");
+        unsafe { libc::_exit(1) }
+    };
+
+    let expected = WORKER_FD_TARGETS.len() + 1 + usize::from(req.has_plan);
+    if job_fds.len() != expected {
+        fail(format!(
+            "worker job expected {expected} descriptors, got {}",
+            job_fds.len()
+        ));
+    }
+
+    // Move job's sandbox.log onto stdout/stderr first so any error below is captured there.
+    let raw_fds: Vec<RawFd> = job_fds.into_iter().map(IntoRawFd::into_raw_fd).collect();
+    let sandbox_log_fd = raw_fds[WORKER_FD_TARGETS.len()];
+    unsafe {
+        let null = libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+        if null >= 0 {
+            let _ = libc::dup2(null, 0);
+            libc::close(null);
+        }
+        if libc::dup2(sandbox_log_fd, 1) < 0 || libc::dup2(sandbox_log_fd, 2) < 0 {
+            fail(last_err("dup2 sandbox.log"));
+        }
+    }
+
+    // Place the job's hidden descriptors at their exact fixed numbers (clearing FD_CLOEXEC).
+    // `FD_RT` is already inherited from the keeper at `proto::layout::FD_RT`.
+    let mut place: Vec<(RawFd, i32)> = WORKER_FD_TARGETS
+        .iter()
+        .enumerate()
+        .map(|(i, &dst)| (raw_fds[i], dst))
+        .collect();
+    if req.has_plan {
+        place.push((raw_fds[WORKER_FD_TARGETS.len() + 1], proto::layout::FD_PLAN));
+    }
+    let mut tmp = [(0i32, 0i32); 16];
+    for (i, &(src, dst)) in place.iter().enumerate() {
+        let t = unsafe { libc::fcntl(src, libc::F_DUPFD_CLOEXEC, 3100) };
+        if t < 0 {
+            fail(last_err("fcntl F_DUPFD_CLOEXEC"));
+        }
+        tmp[i] = (t, dst);
+    }
+    let mut keep: Vec<RawFd> = Vec::with_capacity(place.len() + 3);
+    for &(t, dst) in &tmp[..place.len()] {
+        if unsafe { libc::dup2(t, dst) } < 0 {
+            fail(last_err("dup2 job fd"));
+        }
+        keep.push(dst);
+    }
+    keep.push(proto::layout::FD_RT);
+    keep.push(guests_userns);
+    keep.push(alive_r_fd);
+    close_others(&keep);
+
+    let r = (|| -> Res<()> {
+        unsafe { libc::umask(0) };
+        let mut seen = std::collections::HashSet::<String>::new();
+        let mut dummy_seq = 0usize;
+        for op in per_job {
+            match op {
+                PerJobOp::Proc { dst } => {
+                    let new_dst = format!("{NEW}{dst}");
+                    mount(
+                        Some("proc"),
+                        &new_dst,
+                        Some("proc"),
+                        libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV,
+                        None,
+                    )?;
+                    for d in ["sys", "sysrq-trigger", "irq", "bus"] {
+                        let p = format!("{new_dst}/{d}");
+                        let cp = c(&p);
+                        if unsafe { libc::access(cp.as_ptr(), libc::W_OK) } < 0 {
+                            let e = std::io::Error::last_os_error().raw_os_error();
+                            if matches!(e, Some(libc::EACCES | libc::ENOENT | libc::EROFS)) {
+                                continue;
+                            }
+                            return Err(last_err(&format!("access {p}")));
+                        }
+                        bind(&p, &p, false, false)?;
+                    }
+                }
+                PerJobOp::Tmpfs {
+                    dst,
+                    size,
+                    main_sized,
+                    needs_create,
+                } => {
+                    let new_dst = format!("{NEW}{dst}");
+                    if *needs_create {
+                        parents(&new_dst, 0o755, &mut seen)?;
+                        ensure_dir(&new_dst, 0o755)?;
+                    }
+                    let sz = if *main_sized {
+                        req.main_disk_bytes
+                    } else {
+                        *size
+                    };
+                    tmpfs(&new_dst, sz)?;
+                }
+                PerJobOp::StageBind {
+                    stage_path,
+                    dst,
+                    is_dir,
+                    needs_create,
+                } => {
+                    let new_dst = format!("{NEW}{dst}");
+                    if *needs_create {
+                        parents(&new_dst, 0o755, &mut seen)?;
+                        if *is_dir {
+                            ensure_dir(&new_dst, 0o755)?;
+                        } else {
+                            ensure_file(&new_dst, 0o444)?;
+                        }
+                    }
+                    mount(
+                        Some(stage_path),
+                        &new_dst,
+                        None,
+                        libc::MS_BIND | libc::MS_REC,
+                        None,
+                    )?;
+                }
+                PerJobOp::Other(inner) => {
+                    apply(inner, &mut dummy_seq, &mut seen)?;
+                }
+            }
+        }
+
+        // Pivot into /newroot and detach the setup tmpfs + /stage/* in one call.
+        let setup_root = unsafe {
+            libc::open(
+                c"/".as_ptr(),
+                libc::O_DIRECTORY | libc::O_RDONLY | libc::O_CLOEXEC,
+            )
+        };
+        sys(setup_root as _, "open /")?;
+        chdir(NEW)?;
+        pivot_root(".", ".")?;
+        sys(unsafe { libc::fchdir(setup_root) } as _, "fchdir")?;
+        unsafe { libc::close(setup_root) };
+        umount(".")?;
+        chdir("/")?;
+
+        // Enter the pre-created guests' user namespace, drop every capability, and normalize
+        // credentials/session/working directory identically to one-shot `setup()`.
+        sys(
+            unsafe { libc::setns(guests_userns, libc::CLONE_NEWUSER) } as _,
+            "join the guests' user namespace",
+        )?;
+        unsafe { libc::close(guests_userns) };
+        drop_bounding()?;
+        sys(
+            unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0) } as _,
+            "dumpable",
+        )?;
+        drop_caps()?;
+        unsafe { libc::umask(0o022) };
+        chdir(&req.chdir)?;
+        sys(unsafe { libc::setsid() } as _, "setsid")?;
+        die_with_parent(|| {
+            let mut p = libc::pollfd {
+                fd: alive_r_fd,
+                events: 0,
+                revents: 0,
+            };
+            unsafe { libc::poll(&mut p, 1, 0) == 0 }
+        });
+        unsafe { libc::close(alive_r_fd) };
+        Ok(())
+    })();
+    if let Err(e) = r {
+        fail(e);
+    }
+
+    let pwd = c(&req.chdir);
+    unsafe {
+        libc::clearenv();
+        libc::setenv(c"PWD".as_ptr(), pwd.as_ptr(), 1);
+    }
+    let code = match crate::sup::main(&req.sup_args) {
+        Ok(c) => {
+            if c == ExitCode::SUCCESS {
+                0
+            } else {
+                1
+            }
+        }
+        Err(e) => {
+            eprintln!("patina: {e}");
+            2
+        }
+    };
+    unsafe { libc::_exit(code) };
+}
+
+/// Wait for job child `pid` while also watching `FD_WORKER_CHAN` for a `"K"` cancel signal or
+/// parent disconnect. Always returns only after `pid` (and therefore its entire PID namespace)
+/// has been reaped.
+fn wait_job_child(pid: i32) -> i32 {
+    if let Ok(pfd) = crate::sys::pidfd_open(pid) {
+        let pfd = unsafe { OwnedFd::from_raw_fd(pfd) };
+        let mut fds = [
+            libc::pollfd {
+                fd: pfd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: FD_WORKER_CHAN,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        loop {
+            let r = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+            if r < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            if fds[1].revents != 0 {
+                if fds[1].revents & libc::POLLIN != 0 {
+                    let mut b = [0u8; 1];
+                    let _ = unsafe { libc::recv(FD_WORKER_CHAN, b.as_mut_ptr().cast(), 1, 0) };
+                }
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                break;
+            }
+            if fds[0].revents != 0 || r < 0 {
+                break;
+            }
+        }
+    }
+    wait_pid(pid)
+}
+
+/// `patina __sandbox-worker --parent PID`: persistent sandbox keeper for `patina batch`.
+pub fn worker_main(args: &[String]) -> Res<ExitCode> {
+    let parent: i32 = match args {
+        [f, p] if f == "--parent" => p.parse().map_err(|_| "__sandbox-worker: --parent PID")?,
+        _ => return Err("__sandbox-worker: usage: __sandbox-worker --parent PID".into()),
+    };
+    let spec: WorkerSpec = serde_json::from_slice(&read_fd(FD_SPEC)?)
+        .map_err(|e| format!("__sandbox-worker: spec: {e}"))?;
+    unsafe { libc::close(FD_SPEC) };
+
+    let (per_job, guests_userns, watch_dirs) = match worker_setup(&spec, parent) {
+        Ok(v) => v,
+        Err(e) => {
+            let msg = e.as_bytes();
+            let len = msg.len().min(4000);
+            unsafe {
+                libc::send(FD_WORKER_CHAN, msg.as_ptr().cast(), len, libc::MSG_NOSIGNAL);
+            }
+            return Ok(ExitCode::from(1));
+        }
+    };
+
+    // Signal readiness to the launcher.
+    unsafe {
+        libc::send(FD_WORKER_CHAN, b"ok".as_ptr().cast(), 2, libc::MSG_NOSIGNAL);
+    }
+
+    // One persistent pipe held open by the keeper for its entire lifetime so every job child can
+    // check liveness in `die_with_parent` without calling `pipe2()` per job.
+    let (alive_r, _alive_w) = pipe()?;
+    let mut buf = vec![0u8; WORKER_REQ_MAX];
+    let clone_flags = (libc::CLONE_NEWPID | libc::CLONE_NEWNS | libc::CLONE_NEWIPC | libc::SIGCHLD)
+        as libc::c_ulong;
+
+    loop {
+        let (n, job_fds) = recv_with(FD_WORKER_CHAN, &mut buf);
+        if n <= 0 {
+            if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Ok(ExitCode::SUCCESS);
+        }
+        // Ignore a late 1-byte cancel signal that raced with the previous job's natural exit.
+        if n == 1 && buf[0] == b'K' {
+            continue;
+        }
+        let req: JobReq = match serde_json::from_slice(&buf[..n as usize]) {
+            Ok(r) => r,
+            Err(_) => {
+                let reply = [1u8, 1u8];
+                unsafe {
+                    libc::send(
+                        FD_WORKER_CHAN,
+                        reply.as_ptr().cast(),
+                        reply.len(),
+                        libc::MSG_NOSIGNAL,
+                    );
+                }
+                return Ok(ExitCode::from(1));
+            }
+        };
+
+        // Both x86_64 and aarch64 take (flags, child_stack=0, 0, 0, 0) for fork-like SYS_clone.
+        let pid =
+            unsafe { libc::syscall(libc::SYS_clone, clone_flags, 0usize, 0usize, 0usize, 0usize) }
+                as i32;
+        if pid < 0 {
+            drop(job_fds);
+            let reply = [126u8, 1u8];
+            unsafe {
+                libc::send(
+                    FD_WORKER_CHAN,
+                    reply.as_ptr().cast(),
+                    reply.len(),
+                    libc::MSG_NOSIGNAL,
+                );
+            }
+            return Ok(ExitCode::from(1));
+        }
+        if pid == 0 {
+            drop(_alive_w);
+            worker_pid1(
+                &per_job,
+                guests_userns.as_raw_fd(),
+                alive_r.as_raw_fd(),
+                req,
+                job_fds,
+            );
+        }
+
+        // Release every per-job descriptor immediately so `outcome_w` closes when the child ends.
+        drop(job_fds);
+        let st = wait_job_child(pid);
+
+        let dirty = dirs_dirty(&watch_dirs);
+        let reply = [exit_code(st), u8::from(dirty)];
+        let sent = unsafe {
+            libc::send(
+                FD_WORKER_CHAN,
+                reply.as_ptr().cast(),
+                reply.len(),
+                libc::MSG_NOSIGNAL,
+            )
+        };
+        if dirty || sent < 0 {
+            return Ok(ExitCode::SUCCESS);
+        }
+    }
 }
 
 #[cfg(test)]
