@@ -755,6 +755,8 @@ pub struct Start<'a> {
     pub shm: std::os::fd::RawFd,
     /// The run's plans, with load-time points (`launcher::plans`).
     pub planner: Option<std::sync::Arc<crate::launcher::plans::Planner>>,
+    /// Shared 64 KiB edge-coverage bitmap (`FD_COVERAGE`), one memfd per run when `--coverage` is set.
+    pub coverage: Option<std::os::fd::RawFd>,
 }
 
 /// The descriptor `Start::shm` names, made once per run.
@@ -763,6 +765,17 @@ pub fn shm_carrier() -> Res<OwnedFd> {
     let fd = cvt_i(unsafe { libc::memfd_create(n.as_ptr(), libc::MFD_CLOEXEC) })
         .map_err(|e| format!("memfd patina-shm-state: {e}"))?;
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// The 64 KiB shared coverage bitmap memfd (`FD_COVERAGE`), made once per run.
+pub fn coverage_carrier() -> Res<OwnedFd> {
+    let n = CString::new("patina-cov").unwrap();
+    let fd = cvt_i(unsafe { libc::memfd_create(n.as_ptr(), libc::MFD_CLOEXEC) })
+        .map_err(|e| format!("memfd patina-cov: {e}"))?;
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    cvt_i(unsafe { libc::ftruncate(fd.as_raw_fd(), proto::plan::COVERAGE_SIZE as i64) })
+        .map_err(|e| format!("ftruncate patina-cov: {e}"))?;
+    Ok(fd)
 }
 
 /// What one boot left behind.
@@ -1224,6 +1237,8 @@ pub fn run_boot_with_worker(
     cfg.log_paths = 1;
     cfg.observe = c.observe as u64;
     cfg.debug = c.debug_at.unwrap_or(0);
+    cfg.profile_cpu_interval = c.profile_cpu_interval;
+    cfg.coverage = c.coverage as u64;
     if c.pause_points {
         cfg.sched |= proto::ctl::SCHED_PAUSE_POINTS;
     }
@@ -1348,6 +1363,8 @@ pub fn run_boot_with_worker(
         && !no_personality
         && !perturb
         && c.debug_at.is_none()
+        && c.profile_cpu_interval == 0
+        && start.coverage.is_none()
         && std::env::var_os("PATINA_NO_SANDBOX_REUSE").is_none();
 
     // Reuse an already-started worker's `copies` list without rebuilding `Layout` (avoids cloning
@@ -1589,6 +1606,32 @@ pub fn run_boot_with_worker(
             if let Some(f) = &plan_sandbox {
                 place.push((f.as_raw_fd(), FD_PLAN));
             }
+            let cpu_profile = if c.profile_cpu_interval > 0 {
+                let path = bdir.join("cpu_profile.bin");
+                let mut f = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                    .map_err(|e| format!("create cpu_profile.bin: {e}"))?;
+                #[cfg(target_arch = "x86_64")]
+                let arch: u32 = 62;
+                #[cfg(target_arch = "aarch64")]
+                let arch: u32 = 183;
+                f.write_all(&proto::guest_profile::encode_header(arch))
+                    .map_err(|e| format!("write cpu_profile.bin header: {e}"))?;
+                drop(f);
+                let af = OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .map_err(|e| format!("open cpu_profile.bin: {e}"))?;
+                place.push((af.as_raw_fd(), FD_CPU_PROFILE));
+                Some(af)
+            } else {
+                None
+            };
+            if let Some(fd) = start.coverage {
+                place.push((fd, FD_COVERAGE));
+            }
 
             let mut cmd = sandbox::command(place, move || unsafe {
                 if perturb {
@@ -1620,6 +1663,7 @@ pub fn run_boot_with_worker(
             drop(etc_fds);
             drop(spec_fd);
             drop(plan_sandbox);
+            drop(cpu_profile);
             let plan_broker = match (plan_ours, &start.planner) {
                 (Some(ours), Some(p)) => Some(crate::launcher::plans::Broker::start(
                     ours,

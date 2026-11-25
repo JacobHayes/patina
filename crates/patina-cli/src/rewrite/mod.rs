@@ -54,10 +54,14 @@ pub const HOST_MACHINE: u16 = elf::EM_AARCH64;
 /// same bytes on any number of threads (`par`). An x86_64 file is planned on an x86_64 host
 /// (its decoder is built there only); an arm64 file on any host.
 pub fn make_plan(elf: &elf::Elf, build: &str, par: &par::Par) -> Res<Plan> {
+    make_plan_with(elf, build, false, par)
+}
+
+pub fn make_plan_with(elf: &elf::Elf, build: &str, coverage: bool, par: &par::Par) -> Res<Plan> {
     match elf.machine {
         #[cfg(target_arch = "x86_64")]
-        elf::EM_X86_64 => x86::make_plan(elf, build, par),
-        elf::EM_AARCH64 => a64::make_plan(elf, build, par),
+        elf::EM_X86_64 => x86::make_plan(elf, build, coverage, par),
+        elf::EM_AARCH64 => a64::make_plan_with(elf, build, coverage, par),
         _ => Err("unsupported architecture: x86_64 files are planned on x86_64 hosts".into()),
     }
 }
@@ -65,22 +69,35 @@ pub fn make_plan(elf: &elf::Elf, build: &str, par: &par::Par) -> Res<Plan> {
 /// The plan for `elf`, its bytes, and every way it fails to be a sound plan for it (the
 /// independent verifier of its architecture; empty when it is one). The verifier finds code
 /// its own way while the plan is made, then checks the plan while it is written out.
+#[allow(dead_code)]
 pub fn plan_verified(
     elf: &elf::Elf,
     build: &str,
     par: &par::Par,
 ) -> Res<(Plan, Vec<u8>, Vec<String>)> {
+    plan_verified_with(elf, build, false, par)
+}
+
+pub fn plan_verified_with(
+    elf: &elf::Elf,
+    build: &str,
+    coverage: bool,
+    par: &par::Par,
+) -> Res<(Plan, Vec<u8>, Vec<String>)> {
     match elf.machine {
         #[cfg(target_arch = "x86_64")]
         elf::EM_X86_64 => {
-            let (plan, found) = par.join(|| make_plan(elf, build, par), || verify::Found::new(elf));
+            let (plan, found) = par.join(
+                || make_plan_with(elf, build, coverage, par),
+                || verify::Found::new(elf),
+            );
             let plan = plan?;
             let (bytes, bad) = par.join(|| plan.to_bytes(), || verify::check(&found, &plan, par));
             Ok((plan, bytes, bad))
         }
         elf::EM_AARCH64 => {
             let (plan, found) = par.join(
-                || make_plan(elf, build, par),
+                || make_plan_with(elf, build, coverage, par),
                 || a64::verify::Found::new(elf),
             );
             let plan = plan?;
@@ -353,18 +370,27 @@ mod x86 {
     use std::collections::{btree_map::Entry, BTreeMap};
 
     /// The plan for the file `elf`, made by patina build `build`. A pure function of both.
-    pub fn make_plan(elf: &Elf, build: &str, par: &Par) -> Res<Plan> {
+    pub fn make_plan(elf: &Elf, build: &str, coverage: bool, par: &Par) -> Res<Plan> {
         let text: Vec<(u64, &[u8])> = elf.text.iter().map(|t| (t.addr, elf.bytes(t))).collect();
         let code = Code::analyze(&text, &elf.anchors, &elf.extents, elf.exec, par);
-        let (choices, patches) = points::select(&code, par);
+        let (choices, patches) = points::select_with(&code, coverage, par);
         let tramp_vaddr = elf.image_end().next_multiple_of(PAGE);
-        let mut em = points::emit(&code, &patches, tramp_vaddr, par);
+        let cov_sha = coverage.then_some(&elf.sha256);
+        let mut em = points::emit_with(&code, &patches, tramp_vaddr, cov_sha, par);
         let cpuid = points::cpuid_sites(&code, &mut em, par);
         let blob_end = tramp_vaddr + em.tramp.len() as u64;
         if CELL < blob_end && elf.image_start() < CELL + 8 {
             return Err(format!(
                 "the image or its trampolines overlap the cell at {CELL:#x}"
             ));
+        }
+        if coverage {
+            let (cov, cov_len) = (proto::plan::COVERAGE_MAP, proto::plan::COVERAGE_SIZE);
+            if cov < blob_end && elf.image_start() < cov + cov_len {
+                return Err(format!(
+                    "the image or its trampolines overlap the coverage bitmap at {cov:#x}"
+                ));
+            }
         }
         // The patched pages: each the original page of the executable segment, patched.
         let mut pages: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
@@ -441,6 +467,7 @@ mod x86 {
         }
         Ok(Plan {
             machine: elf.machine,
+            coverage,
             sha256: elf.sha256,
             build: build.to_string(),
             cell: CELL,
@@ -451,5 +478,31 @@ mod x86 {
             entries: em.entries,
             counts,
         })
+    }
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod x86_cov_tests {
+    use super::*;
+
+    #[test]
+    fn coverage_plan_for_current_binary_verifies_and_round_trips() {
+        let exe = std::env::current_exe().expect("current_exe");
+        let data = std::fs::read(&exe).expect("read current_exe");
+        let elf = elf::Elf::parse(&data).expect("parse current_exe");
+        let par = par::Par::new(default_threads());
+        let plan = make_plan_with(&elf, "test", true, &par).expect("coverage plan");
+        assert!(plan.coverage);
+        assert!(!plan.sites.is_empty());
+        let bad = verify_plan(&data, &plan, &par);
+        assert!(
+            bad.is_empty(),
+            "coverage plan verification errors: {:?}",
+            &bad[..bad.len().min(10)]
+        );
+        let bytes = plan.to_bytes();
+        let decoded = Plan::from_bytes(&bytes).expect("decode coverage plan");
+        assert!(decoded.coverage);
+        assert_eq!(decoded.sites.len(), plan.sites.len());
     }
 }

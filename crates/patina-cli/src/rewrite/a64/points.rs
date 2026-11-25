@@ -42,7 +42,9 @@
 use super::code::{Code, ADDR, PAIR, RETRY, TAINT};
 use super::insn::{self, Flow, Ind, X16};
 use crate::rewrite::plan::{Site, CELL, PAGE};
-use proto::plan::{A64_COUNT, A64_TRAP, KIND_BEFORE, KIND_COND, KIND_FAR, KIND_JUMP};
+use proto::plan::{
+    A64_COUNT, A64_COUNT_COV, A64_TRAP, COVERAGE_MAP, KIND_BEFORE, KIND_COND, KIND_FAR, KIND_JUMP,
+};
 
 pub use crate::rewrite::class::Class;
 
@@ -80,10 +82,11 @@ pub struct Choice {
     pub outcome: Outcome,
 }
 
-/// The site class of the word `w` at `a`, and its kind of patch.
-pub fn classify(a: u64, w: u32) -> Option<(Class, u8)> {
+/// The site class of the word `w` at `a`; when `coverage` is true, forward direct branches
+/// and calls are also instrumented so straight-line control-flow edges populate the bitmap.
+pub fn classify_with(a: u64, w: u32, coverage: bool) -> Option<(Class, u8)> {
     match insn::flow(a, w) {
-        Flow::Direct { target, link } if target <= a => Some(if link {
+        Flow::Direct { target, link } if coverage || target <= a => Some(if link {
             (Class::BackCall, KIND_JUMP)
         } else {
             (Class::BackBranch, KIND_JUMP)
@@ -91,7 +94,7 @@ pub fn classify(a: u64, w: u32) -> Option<(Class, u8)> {
         Flow::Cond {
             target,
             hinted: false,
-        } if target <= a => Some((Class::BackBranch, KIND_COND)),
+        } if coverage || target <= a => Some((Class::BackBranch, KIND_COND)),
         Flow::Indirect(Ind::Jump) => Some((Class::IndirectJump, KIND_BEFORE)),
         Flow::Plain if insn::atomic(w) => Some((Class::Atomic, KIND_BEFORE)),
         _ => None,
@@ -107,6 +110,25 @@ pub fn count(t: u64, s: u64) -> [u32; 7] {
         0xd100_0631, // sub x17, x17, #1
         0xf900_0211, // str x17, [x16]
         insn::cbz_x17(t.wrapping_add(20), s),
+        RESTORE,
+    ]
+}
+
+/// The count's words with non-wrapping edge-coverage increment at `COVERAGE_MAP + edge_idx`.
+pub fn count_cov(t: u64, s: u64, edge_idx: u16) -> [u32; 13] {
+    [
+        0xa9be_47f0, // stp x16, x17, [sp, #-32]!
+        insn::movz_hi(X16, COVERAGE_MAP),
+        0xf280_0000 | ((edge_idx as u32) << 5) | 16, // movk x16, #edge_idx
+        0x3940_0211,                                 // ldrb w17, [x16]
+        0x1100_0631,                                 // add w17, w17, #1
+        0x2a51_2231,                                 // orr w17, w17, w17, lsr #8 (never wraps to 0)
+        0x3900_0211,                                 // strb w17, [x16]
+        insn::movz_hi(X16, CELL),
+        0xf940_0211, // ldr x17, [x16]
+        0xd100_0631, // sub x17, x17, #1
+        0xf900_0211, // str x17, [x16]
+        insn::cbz_x17(t.wrapping_add(44), s),
         RESTORE,
     ]
 }
@@ -136,11 +158,22 @@ pub struct Emitted {
 
 /// `far(site, target)`: whether a call or jump to `target` may go through `x16` (`KIND_FAR`)
 /// when a `b` from its trampoline does not reach.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn emit(code: &Code, place: Place, far: &dyn Fn(u64, u64) -> bool) -> Emitted {
+    emit_with(code, place, None, far)
+}
+
+pub fn emit_with(
+    code: &Code,
+    place: Place,
+    cov_sha: Option<&[u8; 32]>,
+    far: &dyn Fn(u64, u64) -> bool,
+) -> Emitted {
+    let coverage = cov_sha.is_some();
     let mut choices = vec![];
     let mut todo = vec![];
     for (a, w) in code.proven() {
-        let Some((class, kind)) = classify(a, w) else {
+        let Some((class, kind)) = classify_with(a, w, coverage) else {
             continue;
         };
         let target = match insn::flow(a, w) {
@@ -169,7 +202,14 @@ pub fn emit(code: &Code, place: Place, far: &dyn Fn(u64, u64) -> bool) -> Emitte
     let mut make =
         |at: &mut u64, up: bool, &(i, a, w, kind, target): &(usize, u64, u32, u8, Option<u64>)| {
             let fits = |t: u64, far_row: bool| {
-                trampoline(a, w, if far_row { KIND_FAR } else { kind }, target, t)
+                trampoline_with(
+                    a,
+                    w,
+                    if far_row { KIND_FAR } else { kind },
+                    target,
+                    t,
+                    cov_sha,
+                )
             };
             let far_ok = kind == KIND_JUMP && target.is_some_and(|to| far(a, to));
             let mut got = None;
@@ -177,7 +217,7 @@ pub fn emit(code: &Code, place: Place, far: &dyn Fn(u64, u64) -> bool) -> Emitte
                 if far_row && !far_ok {
                     break;
                 }
-                let n = words(if far_row { KIND_FAR } else { kind }) * 4;
+                let n = words(if far_row { KIND_FAR } else { kind }, coverage) * 4;
                 let t = if up { *at } else { at.wrapping_sub(n) };
                 if let Some(x) = fits(t, far_row) {
                     got = Some((t, n, x));
@@ -227,18 +267,20 @@ pub fn emit(code: &Code, place: Place, far: &dyn Fn(u64, u64) -> bool) -> Emitte
 }
 
 /// Words of a trampoline of `kind`.
-fn words(kind: u8) -> u64 {
+fn words(kind: u8, coverage: bool) -> u64 {
     let row = match kind {
         KIND_BEFORE => 2,
         KIND_FAR => 3,
         _ => 1,
     };
     let cond = if kind == KIND_COND { 2 } else { 0 };
-    cond + 7 + row + 3
+    let cnt = if coverage { 13 } else { 7 };
+    cond + cnt + row + 3
 }
 
 /// The trampoline at `t` for the site `w` at `a` of `kind`: its words, its row, and the word
 /// that replaces the site. None when a branch would not reach.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn trampoline(
     a: u64,
     w: u32,
@@ -246,13 +288,28 @@ pub(super) fn trampoline(
     target: Option<u64>,
     t: u64,
 ) -> Option<(Vec<u32>, Site, u32)> {
+    trampoline_with(a, w, kind, target, t, None)
+}
+
+pub(super) fn trampoline_with(
+    a: u64,
+    w: u32,
+    kind: u8,
+    target: Option<u64>,
+    t: u64,
+    cov_sha: Option<&[u8; 32]>,
+) -> Option<(Vec<u32>, Site, u32)> {
     let mut out = vec![];
     if kind == KIND_COND {
         out.push(insn::cond_to(w, t, t.wrapping_add(8))?);
         out.push(insn::b(t.wrapping_add(4), a + 4, false)?);
     }
     let c = t.wrapping_add(4 * out.len() as u64);
-    let r = c.wrapping_add(A64_COUNT);
+    let r = c.wrapping_add(if cov_sha.is_some() {
+        A64_COUNT_COV
+    } else {
+        A64_COUNT
+    });
     let row: Vec<u32> = match kind {
         KIND_BEFORE => vec![w, insn::b(r.wrapping_add(4), a + 4, false)?],
         KIND_FAR => {
@@ -266,10 +323,15 @@ pub(super) fn trampoline(
         _ => vec![insn::b(r, target?, false)?],
     };
     let s = r.wrapping_add(4 * row.len() as u64);
-    out.extend(count(c, s));
+    if let Some(sha) = cov_sha {
+        let idx = proto::plan::coverage_index(sha, a);
+        out.extend(count_cov(c, s, idx));
+    } else {
+        out.extend(count(c, s));
+    }
     out.extend(&row);
     out.extend([RESTORE, A64_TRAP, insn::b(s.wrapping_add(8), r, false)?]);
-    debug_assert_eq!(out.len() as u64, words(kind));
+    debug_assert_eq!(out.len() as u64, words(kind, cov_sha.is_some()));
     let link = matches!(insn::flow(a, w), Flow::Direct { link: true, .. });
     let patch = insn::b(a, t, link)?;
     let site = Site {

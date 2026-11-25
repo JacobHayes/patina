@@ -278,6 +278,12 @@ pub fn check(f: &Found, plan: &Plan, par: &Par) -> Vec<String> {
             plan.cell
         ));
     }
+    if plan.coverage {
+        let (cov, cov_len) = (proto::plan::COVERAGE_MAP, proto::plan::COVERAGE_SIZE);
+        if in_image(cov, cov_len) || (cov < blob.0 + blob.1 && blob.0 < cov + cov_len) {
+            bad.push(format!("coverage bitmap at {cov:#x} is not free"));
+        }
+    }
 
     if plan
         .pages
@@ -478,19 +484,37 @@ fn check_site(
     let t = plan.tramp_vaddr + s.tramp as u64;
     let tb = &plan.tramp[s.tramp as usize..s.tramp as usize + s.tramp_len as usize];
     let ti = |off: usize| decode(&tb[off.min(tb.len())..], t + off as u64);
+    // [coverage]: add byte [COV+idx], 1; adc byte [COV+idx], 0
     // T: dec qword [cell]; je S, the count exactly as the runtime expects it (no prefix)
-    let dec = ti(0);
+    let cov_off = if plan.coverage {
+        let idx = proto::plan::coverage_index(&plan.sha256, a);
+        let addr = (proto::plan::COVERAGE_MAP + idx as u64) as u32;
+        let mut cov = Vec::with_capacity(16);
+        cov.extend_from_slice(&[0x80, 0x04, 0x25]);
+        cov.extend_from_slice(&addr.to_le_bytes());
+        cov.push(0x01);
+        cov.extend_from_slice(&[0x80, 0x14, 0x25]);
+        cov.extend_from_slice(&addr.to_le_bytes());
+        cov.push(0x00);
+        if tb.get(..16) != Some(&cov[..]) {
+            return Err("the coverage trampoline does not start by recording the edge".into());
+        }
+        16usize
+    } else {
+        0usize
+    };
+    let dec = ti(cov_off);
     let mut count = vec![0x48, 0xff, 0x0c, 0x25];
     count.extend_from_slice(&(plan.cell as u32).to_le_bytes());
-    if tb.get(..8) != Some(&count[..]) || dec.code() != Op::Dec_rm64 {
+    if tb.get(cov_off..cov_off + 8) != Some(&count[..]) || dec.code() != Op::Dec_rm64 {
         return Err("the trampoline does not start by counting in the cell".into());
     }
-    let je = ti(dec.len());
+    let je = ti(cov_off + dec.len());
     let trap = t + s.trap as u64;
     if je.mnemonic() != Mnemonic::Je || je.near_branch_target() != trap {
         return Err("the count does not branch to the site's trap".into());
     }
-    let r = dec.len() + je.len();
+    let r = cov_off + dec.len() + je.len();
     let mut inner = vec![];
     // The row, then S: ud2; jmp R, ending the trampoline.
     let mut row_end = r;

@@ -213,6 +213,11 @@ pub fn run_chain_with_worker(
     let mut log_used = 0;
     let mut k = 0;
     let shm = shm_carrier()?;
+    let cov_fd = if o.cfg.coverage {
+        Some(crate::launch::coverage_carrier()?)
+    } else {
+        None
+    };
     let mut plans = [0u64; proto::ctl::PLAN_FIELDS];
     let t_plan0 = crate::profile::stamp();
     let planner = match shared_planner {
@@ -247,6 +252,7 @@ pub fn run_chain_with_worker(
             log_used,
             shm: shm.as_raw_fd(),
             planner: planner.clone(),
+            coverage: cov_fd.as_ref().map(|f| f.as_raw_fd()),
         };
         let mut end =
             run_boot_with_worker(o, &bdir, cpu, no_personality, &start, worker.as_deref_mut())?;
@@ -371,6 +377,10 @@ pub fn run_chain_with_worker(
                 settle: (settle[0] != 0).then_some(settle),
                 planner_span,
                 profile_boots,
+                coverage: cov_fd
+                    .as_ref()
+                    .map(|f| read_coverage(f.as_raw_fd()))
+                    .transpose()?,
             });
         }
         let (kind, seq, vclock) = crash_detail(&end.verdict.detail)
@@ -425,14 +435,58 @@ pub fn run_chain_with_worker(
     }
 }
 
+/// Read the 64 KiB edge-coverage bitmap accumulated across boots into a compact `CoverageReport`.
+fn read_coverage(fd: std::os::fd::RawFd) -> Res<crate::result::CoverageReport> {
+    let mut buf = vec![0u8; proto::plan::COVERAGE_SIZE as usize];
+    let mut off = 0usize;
+    while off < buf.len() {
+        let r = unsafe {
+            libc::pread(
+                fd,
+                buf[off..].as_mut_ptr() as *mut libc::c_void,
+                buf.len() - off,
+                off as i64,
+            )
+        };
+        if r < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(format!("read coverage bitmap: {e}"));
+        }
+        if r == 0 {
+            break;
+        }
+        off += r as usize;
+    }
+    let mut edges_hit = 0u64;
+    let mut total_hits = 0u64;
+    let mut edge_hashes = Vec::new();
+    for (idx, &hits) in buf.iter().enumerate() {
+        if hits > 0 {
+            edges_hit += 1;
+            total_hits += hits as u64;
+            let bucket = proto::guest_profile::hit_bucket(hits);
+            edge_hashes.push(proto::guest_profile::edge_hash(idx as u16, bucket));
+        }
+    }
+    Ok(crate::result::CoverageReport {
+        edges_hit,
+        total_hits,
+        edge_hashes,
+    })
+}
+
 /// Warm a shared `Planner` once for reuse across many runs (e.g. `patina batch`).
 pub fn warm_planner(o: &Opts) -> Res<Option<crate::launcher::plans::Planner>> {
     if !o.cfg.preempt.points() {
         return Ok(None);
     }
-    let p = crate::launcher::plans::Planner::new(
+    let p = crate::launcher::plans::Planner::new_with_coverage(
         crate::result::build()?,
         crate::rewrite::default_threads(),
+        o.cfg.coverage,
     );
     crate::rewrite::cache::warm_all(&p, &o.program.host);
     Ok(Some(p))

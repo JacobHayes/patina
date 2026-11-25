@@ -134,6 +134,8 @@ pub struct ThreadState {
     /// Compute points (`compute.rs`): events charged to this thread, segments it started.
     pub compute_events: u64,
     pub compute_segs: u64,
+    /// Deterministic CPU profiling (`profile.rs`): compute events remaining until next sample.
+    pub sample_rem: u64,
     /// The call being served (its row, 0 for none, and the guest's arguments), checked again
     /// by `guest::still_clear` after a park: other threads ran meanwhile.
     pub call_row: u64,
@@ -169,6 +171,7 @@ impl ThreadState {
             spin: crate::spin::Spin::new(),
             compute_events: 0,
             compute_segs: 0,
+            sample_rem: 0,
             call_row: 0,
             call_args: [0; 6],
             paths: crate::resolve::Paths::new(),

@@ -147,6 +147,16 @@ pub struct Config {
     pub main_disk_mb: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub main_max_boots: Option<u64>,
+    /// Deterministic compute-point CPU sampling interval (`--profile-cpu[=N]`; 0: off).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub profile_cpu_interval: u64,
+    /// Black-box ELF edge-coverage bitmap (`--coverage`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub coverage: bool,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// One machine of a run with several machines (`proto::machine`).
@@ -265,6 +275,8 @@ impl Default for Config {
             main_no_faults: false,
             main_disk_mb: None,
             main_max_boots: None,
+            profile_cpu_interval: 0,
+            coverage: false,
         }
     }
 }
@@ -1181,6 +1193,24 @@ fn test_inputs(c: &mut Config) -> Res<()> {
     Ok(())
 }
 
+/// Parse `--profile-cpu[=N]` from CLI arguments.
+pub fn parse_profile_cpu(a: &Args) -> Res<Option<u64>> {
+    if !a.has("--profile-cpu") {
+        return Ok(None);
+    }
+    let v = a.last("--profile-cpu").unwrap_or("");
+    if v.is_empty() {
+        return Ok(Some(proto::guest_profile::DEFAULT_CPU_INTERVAL));
+    }
+    let n = v
+        .parse::<u64>()
+        .map_err(|_| format!("--profile-cpu: not a number: {v}"))?;
+    if n == 0 {
+        return Err("--profile-cpu: interval must be at least 1".into());
+    }
+    Ok(Some(n))
+}
+
 pub fn resolve(a: &Args) -> Res<Config> {
     let c = resolve_any(a)?;
     if c.cmd.is_empty() {
@@ -1282,6 +1312,12 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
             name,
             id: std::env::var(crate::check::CASE_ID_VAR).ok(),
         });
+    }
+    if let Some(n) = parse_profile_cpu(a)? {
+        c.profile_cpu_interval = n;
+    }
+    if a.has("--coverage") {
+        c.coverage = true;
     }
     if let Some(cmd) = a.cmd.as_ref().filter(|v| !v.is_empty()) {
         c.cmd = cmd.clone();

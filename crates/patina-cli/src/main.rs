@@ -13,6 +13,7 @@ mod durability;
 mod events;
 mod explain;
 mod faults;
+mod guest_profile;
 mod guide;
 mod host;
 mod inputs;
@@ -23,6 +24,7 @@ mod log;
 mod minimize;
 mod outcome;
 mod profile;
+mod profile_html;
 mod ready;
 mod recheck;
 mod replay;
@@ -138,6 +140,7 @@ fn main() -> ExitCode {
             "--check and -j judge runs again: give --recheck".into(),
         )),
         Cmd::Report => report::main(&a).map_err(error),
+        Cmd::Profile => guest_profile::main(&a).map_err(error),
         Cmd::Minimize => minimize::main(&a),
         Cmd::Ctl => Ok(ctl::main(&a.positional)),
         Cmd::Wait => Ok(ready::wait(&a.positional)),

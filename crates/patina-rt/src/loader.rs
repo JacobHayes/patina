@@ -301,6 +301,14 @@ pub fn load(path: &[u8], dyn_base: u64, interp: bool) -> Image {
                             );
                         }
                         if prot & PROT_EXEC != 0 {
+                            let plen = path.iter().position(|&c| c == 0).unwrap_or(path.len());
+                            crate::guest_profile::record_image(
+                                va,
+                                va + fmap,
+                                base,
+                                p.offset - off_in_page,
+                                &path[..plen],
+                            );
                             crate::plans::on_map(
                                 va,
                                 fmap,

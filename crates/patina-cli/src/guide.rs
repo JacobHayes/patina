@@ -29,6 +29,7 @@ pub const TOPICS: &[Topic] = topics![
     "machines",
     "sweeps",
     "failures",
+    "profiling",
     "sdk",
     "limits",
     "config",

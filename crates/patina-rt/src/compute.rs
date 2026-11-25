@@ -66,6 +66,12 @@ pub struct Compute {
     pub other: bool,
     /// Events charged in this process.
     pub events: u64,
+    /// Deterministic CPU profiling (`--profile-cpu`): remaining events in the current segment
+    /// after a mid-segment sample slice, whether the active slice ends on a sample boundary,
+    /// and whether the next `exit_slow` resumes `seg_rem` without drawing a new segment.
+    pub seg_rem: i64,
+    pub sample_cut: bool,
+    pub continue_seg: bool,
 }
 
 impl Compute {
@@ -81,6 +87,9 @@ impl Compute {
             stays: 0,
             other: false,
             events: 0,
+            seg_rem: 0,
+            sample_cut: false,
+            continue_seg: false,
         }
     }
 
@@ -172,6 +181,9 @@ fn enter_slow(ts: &mut ThreadState) {
     bump(&c.compute.events, used);
     let t = (c.vclock_ns.load(Relaxed)).saturating_add(used * c.config.compute_charge_ns);
     c.vclock_ns.store(t, Relaxed);
+    if c.config.profile_cpu_interval != 0 {
+        ts.sample_rem = ts.sample_rem.saturating_sub(used);
+    }
     crate::profile::record_compute_enter(crate::profile::now_ns().saturating_sub(t0));
 }
 
@@ -196,9 +208,27 @@ pub fn exit(ts: &mut ThreadState) {
 /// whose rebuilt code has said hello does not read the view: one gap at a time.
 fn exit_slow(ts: &mut ThreadState) {
     let t0 = crate::profile::now_ns();
-    ts.compute_segs += 1;
     let c = ctl();
     let cfg = &c.config;
+    let sample_k = cfg.profile_cpu_interval;
+    if sample_k != 0 {
+        if ts.sample_rem == 0 {
+            ts.sample_rem = sample_k;
+        }
+        let p = &mut proc().compute;
+        if p.continue_seg {
+            p.continue_seg = false;
+            let srem = ts.sample_rem.max(1);
+            let slice = (p.seg_rem as u64).min(srem) as i64;
+            p.handed = slice;
+            p.seg_rem -= slice;
+            p.sample_cut = slice as u64 == srem;
+            write_cell(slice);
+            crate::profile::record_compute_exit(crate::profile::now_ns().saturating_sub(t0));
+            return;
+        }
+    }
+    ts.compute_segs += 1;
     let seq = c.seq.load(Relaxed);
     // The first event at or after the next deadline, or past the time limit, is a point.
     let due = c.next_deadline_ns.load(Relaxed).min(
@@ -249,12 +279,26 @@ fn exit_slow(ts: &mut ThreadState) {
     ts.compute_segs += ch.gaps - 1;
     let p = &mut proc().compute;
     p.armed = ch.armed as i64;
-    p.handed = ch.armed as i64;
     p.draw = ch.draw;
     p.cut = ch.reason;
     p.stays = ch.stays;
     p.other = runnable >= 2 && ch.reason == REASON_SWITCH;
-    write_cell(ch.armed as i64);
+    if sample_k != 0 {
+        let srem = ts.sample_rem.max(1);
+        let total = ch.armed as i64;
+        let slice = (total as u64).min(srem) as i64;
+        p.handed = slice;
+        p.seg_rem = total - slice;
+        p.sample_cut = slice as u64 == srem;
+        p.continue_seg = false;
+        write_cell(slice);
+    } else {
+        p.handed = ch.armed as i64;
+        p.seg_rem = 0;
+        p.sample_cut = false;
+        p.continue_seg = false;
+        write_cell(ch.armed as i64);
+    }
     crate::profile::record_compute_exit(crate::profile::now_ns().saturating_sub(t0));
 }
 
@@ -321,6 +365,24 @@ fn map_cell() {
     }
 }
 
+fn map_coverage() {
+    use crate::raw::*;
+    let r = unsafe {
+        sc6(
+            nr::MMAP,
+            proto::plan::COVERAGE_MAP,
+            proto::plan::COVERAGE_SIZE,
+            PROT_READ | PROT_WRITE,
+            MAP_SHARED | MAP_FIXED_NOREPLACE,
+            proto::layout::FD_COVERAGE as u64,
+            0,
+        )
+    };
+    if r as u64 != proto::plan::COVERAGE_MAP {
+        cell_lost(r.min(0), true);
+    }
+}
+
 /// An image's start with load-time points: the cell is there before the first instruction,
 /// since every trampoline counts in it; `exit` arms it on the way into the program.
 pub fn start_points() {
@@ -334,6 +396,9 @@ pub fn start_points() {
             sc3(nr::IOPERM, 0, 65536, 0);
         }
         map_cell();
+        if crate::state::config().coverage != 0 {
+            map_coverage();
+        }
         let p = &mut proc().compute;
         p.mode = ON;
         p.handed = 0;
@@ -432,11 +497,9 @@ fn maps_hit(line: &[u8], pc: u64) -> Option<(u64, u64, &[u8])> {
 }
 
 /// The trap of `COMPUTE_POINT` or of a plan's trampoline (after `enter`), with the program's
-/// registers in `frame`, at `pc` as the program sees it (`plans::shown`). Returns to the trap
-/// entry, which leaves through the normal trap exit. At a plan's point (`walk`) a switch first
-/// walks a drawn number of instructions on (`proto::compute::walk`, `spin::walk`) and is taken
-/// there (`switch`).
-pub fn point(ts: &mut ThreadState, frame: &Frame, pc: u64, walk: bool) {
+/// registers in `frame`, at `pc` as the program sees it (`plans::shown`). Returns `true` when
+/// this was a real scheduling point (not a mid-segment CPU-profiling sample slice).
+pub fn point(ts: &mut ThreadState, frame: &Frame, pc: u64, walk: bool) -> bool {
     let t0 = crate::profile::now_ns();
     let p = &mut proc().compute;
     let reason = match p.mode {
@@ -447,9 +510,20 @@ pub fn point(ts: &mut ThreadState, frame: &Frame, pc: u64, walk: bool) {
         // `exit` rewrites the cell on the way out.
         _ => {
             crate::profile::record_compute_point(crate::profile::now_ns().saturating_sub(t0));
-            return;
+            return false;
         }
     };
+    let sample_k = ctl().config.profile_cpu_interval;
+    if sample_k != 0 && p.sample_cut {
+        p.sample_cut = false;
+        ts.sample_rem = sample_k;
+        crate::guest_profile::record_sample(ts, frame, pc, sample_k);
+    }
+    if p.seg_rem > 0 {
+        p.continue_seg = true;
+        crate::profile::record_compute_point(crate::profile::now_ns().saturating_sub(t0));
+        return false;
+    }
     if walk && reason == REASON_SWITCH && ts.vfork == 0 {
         let c = ctl();
         let key = proto::compute::key(c.seq.load(Relaxed), ts.slot, ts.compute_segs);
@@ -457,12 +531,13 @@ pub fn point(ts: &mut ThreadState, frame: &Frame, pc: u64, walk: bool) {
         if n > 0 {
             crate::spin::walk(ts, n, p.seg());
             crate::profile::record_compute_point(crate::profile::now_ns().saturating_sub(t0));
-            return;
+            return true;
         }
     }
     let seg = p.seg();
     switch(ts, frame, pc, reason, seg, 0);
     crate::profile::record_compute_point(crate::profile::now_ns().saturating_sub(t0));
+    true
 }
 
 /// Take a compute point's stop at `pc` (as the program sees it): one `Preempt` record (`seg`:

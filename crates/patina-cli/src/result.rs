@@ -71,6 +71,16 @@ pub struct RunEnd {
     pub planner_span: Option<crate::profile::Span>,
     /// Coarse phase profiling: per-boot timings (populated only when `PATINA_PROFILE` is on).
     pub profile_boots: Vec<crate::profile::BootTiming>,
+    /// With `--coverage`: black-box ELF edge-coverage bitmap summary.
+    pub coverage: Option<CoverageReport>,
+}
+
+/// Black-box ELF edge-coverage summary collected from the 64 KiB bitmap (`--coverage`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CoverageReport {
+    pub edges_hit: u64,
+    pub total_hits: u64,
+    pub edge_hashes: Vec<u64>,
 }
 
 /// `result.json`'s `ready`: each machine (main first) and the virtual time, in ms as the
@@ -653,6 +663,13 @@ pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
     if let Some([seq, ns]) = e.settle {
         r["settle"] = json!({"seq": seq, "vclock_ns": ns});
     }
+    if let Some(cov) = &e.coverage {
+        r["coverage"] = json!({
+            "edges_hit": cov.edges_hit,
+            "total_hits": cov.total_hits,
+            "edge_hashes": cov.edge_hashes,
+        });
+    }
     if let Some(n) = &e.machines {
         r["machines"] = n.clone();
         // A machine's own end ended the run: which machine, which of its boots, and how.
@@ -1055,6 +1072,13 @@ pub fn print_human(r: &Value, dir: &Path) {
     }
     if let Some(l) = tmpfs_line(r) {
         println!("{l}");
+    }
+    if let Some(cov) = r["coverage"].as_object() {
+        println!(
+            "coverage: {} edges hit ({} total hits)",
+            cov.get("edges_hit").and_then(|v| v.as_u64()).unwrap_or(0),
+            cov.get("total_hits").and_then(|v| v.as_u64()).unwrap_or(0),
+        );
     }
     let check = &r["check"];
     if check.is_object() && check["verdict"] != "not-run" {

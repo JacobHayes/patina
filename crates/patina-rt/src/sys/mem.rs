@@ -23,7 +23,15 @@ fn page_up(x: u64) -> u64 {
 /// is `EFAULT` (`guest::names_runtime`).
 pub(super) fn hits_runtime(a: u64, len: u64) -> bool {
     let end = a.saturating_add(len);
-    len != 0 && end > RT_BASE && a < RT_REGION_END
+    if len == 0 {
+        return false;
+    }
+    if end > RT_BASE && a < RT_REGION_END {
+        return true;
+    }
+    crate::state::config().coverage != 0
+        && end > proto::plan::COVERAGE_MAP
+        && a < proto::plan::COVERAGE_MAP + proto::plan::COVERAGE_SIZE
 }
 
 /// Next address from the top-down cursor (never reused within an image).
@@ -330,6 +338,19 @@ pub fn handle(call: &mut dyn Call) -> Action {
                 let a = args(call);
                 crate::oplog::on_mmap(r as u64, a[1], a[3], a[4] as i32 as i64, a[5]);
                 if a[2] & PROT_EXEC != 0 && a[3] & (MAP_ANONYMOUS | MAP_SHARED) == 0 {
+                    if crate::guest_profile::enabled() {
+                        let mut name = [0u8; proto::guest_profile::MAX_IMAGE_PATH];
+                        let n = crate::plans::fd_name(a[4], &mut name);
+                        if n > 0 {
+                            crate::guest_profile::record_image(
+                                r as u64,
+                                (r as u64).saturating_add(page_up(a[1])),
+                                u64::MAX,
+                                a[5],
+                                &name[..n],
+                            );
+                        }
+                    }
                     crate::plans::on_map(r as u64, a[1], a[2], a[2], a[4], a[5]);
                 } else if a[2] & PROT_EXEC != 0 {
                     crate::plans::unplanned();

@@ -194,7 +194,7 @@ fn ask(fd: u64, off: u64) -> Option<([u64; REPLY_WORDS], u64)> {
 }
 
 /// The kernel's name for `fd` (`/proc/self/fd/N`) into `out`: its length, 0 if none.
-fn fd_name(fd: u64, out: &mut [u8]) -> usize {
+pub(crate) fn fd_name(fd: u64, out: &mut [u8]) -> usize {
     let mut lp = *b"/proc/self/fd/\0\0\0\0\0\0\0\0\0\0\0";
     crate::path::fmt_dec(&mut lp[14..], fd);
     let (p, n) = (lp.as_ptr() as u64, out.len() as u64);
@@ -622,8 +622,13 @@ pub fn shown(pc: u64) -> u64 {
     }
     #[cfg(target_arch = "x86_64")]
     let target = if kind == KIND_JUMP {
-        let rel = crate::guest::get::<i32>(t + JUMP_ROW + 1).unwrap_or(0);
-        (t + JUMP_ROW + 5).wrapping_add(rel as i64 as u64)
+        let jump_row = if config().coverage != 0 {
+            JUMP_ROW_COV
+        } else {
+            JUMP_ROW
+        };
+        let rel = crate::guest::get::<i32>(t + jump_row + 1).unwrap_or(0);
+        (t + jump_row + 5).wrapping_add(rel as i64 as u64)
     } else {
         0
     };
@@ -658,7 +663,11 @@ pub fn try_point(
         }
         return ok;
     };
-    if sig as u64 == crate::sys::sig::SIGSEGV && info[2] & !(PAGE - 1) == CELL {
+    if sig as u64 == crate::sys::sig::SIGSEGV
+        && (info[2] & !(PAGE - 1) == CELL
+            || (config().coverage != 0
+                && (COVERAGE_MAP..COVERAGE_MAP + COVERAGE_SIZE).contains(&info[2])))
+    {
         crate::compute::cell_lost(-e::EFAULT, false);
     }
     let trap =
@@ -667,8 +676,9 @@ pub fn try_point(
         return false;
     }
     let t0 = crate::profile::now_ns();
-    count(proto::ctl::PLAN_POINTS);
-    crate::compute::point(crate::state::thread(), frame, shown(pc), true);
+    if crate::compute::point(crate::state::thread(), frame, shown(pc), true) {
+        count(proto::ctl::PLAN_POINTS);
+    }
     frame.set_pc(pc + TRAP_LEN);
     crate::profile::record_plan_trap(crate::profile::now_ns().saturating_sub(t0));
     true

@@ -111,6 +111,7 @@ fn key(m: &fs::Metadata) -> Key {
 pub struct Planner {
     dir: PathBuf,
     build: String,
+    coverage: bool,
     par: Par,
     notice: Arc<Notice>,
     known: Arc<Mutex<HashMap<Key, Entry>>>,
@@ -137,7 +138,13 @@ const FIXED: usize = 96;
 /// Check the header of the plan file `f` (length `len`) for the file `sha` and build `build`,
 /// and find what the runtime needs: the reply's words but `R_STATUS` and `R_VADDR`, and where
 /// the counts start.
-fn header(f: &File, len: u64, sha: &[u8; 32], build: &str) -> Res<([u64; REPLY_WORDS], u64)> {
+fn header(
+    f: &File,
+    len: u64,
+    sha: &[u8; 32],
+    build: &str,
+    coverage: bool,
+) -> Res<([u64; REPLY_WORDS], u64)> {
     let mut h = [0u8; FIXED];
     f.read_exact_at(&mut h, 0).map_err(|e| e.to_string())?;
     let (np, nt, ns, ne, nb) = (
@@ -148,9 +155,15 @@ fn header(f: &File, len: u64, sha: &[u8; 32], build: &str) -> Res<([u64; REPLY_W
         le(&h, 92, 4),
     );
     let span = le(&h, 64, 8);
+    let want_machine = (super::HOST_MACHINE as u64)
+        | if coverage {
+            (PLAN_FLAG_COVERAGE as u64) << 16
+        } else {
+            0
+        };
     if &h[..8] != MAGIC
         || le(&h, 8, 4) != VERSION as u64
-        || le(&h, 12, 4) != super::HOST_MACHINE as u64
+        || le(&h, 12, 4) != want_machine
         || h[16..48] != sha[..]
         || le(&h, 48, 8) != CELL
         || nb != build.len() as u64
@@ -549,9 +562,14 @@ impl Notice {
 impl Planner {
     /// Plans made on up to `threads` threads at once (more: sooner, never other bytes).
     pub fn new(build: &str, threads: usize) -> Planner {
+        Planner::new_with_coverage(build, threads, false)
+    }
+
+    pub fn new_with_coverage(build: &str, threads: usize, coverage: bool) -> Planner {
         Planner {
             dir: dir(),
             build: build.to_string(),
+            coverage,
             par: Par::new(threads).on(crate::launch::allowed_cpus()),
             notice: Arc::new(Notice {
                 state: Mutex::new(NoticeState::default()),
@@ -569,6 +587,7 @@ impl Planner {
         Planner {
             dir: self.dir.clone(),
             build: self.build.clone(),
+            coverage: self.coverage,
             par: self.par.clone(),
             notice: Arc::clone(&self.notice),
             known: Arc::clone(&self.known),
@@ -579,7 +598,11 @@ impl Planner {
 
     fn base(&self, sha: &str) -> PathBuf {
         let b: String = hex(&Sha256::digest(self.build.as_bytes()))[..16].to_string();
-        self.dir.join(format!("{sha}-{b}"))
+        if self.coverage {
+            self.dir.join(format!("{sha}-{b}-cov"))
+        } else {
+            self.dir.join(format!("{sha}-{b}"))
+        }
     }
 
     /// The SHA-256 of the file `f` (identity `m`), kept under its identity; and its bytes, if
@@ -615,7 +638,7 @@ impl Planner {
         let m = f.metadata().ok()?;
         let ok = fs::read_to_string(base.with_extension("ok")).ok()?;
         let w: Vec<&str> = ok.split_whitespace().collect();
-        let (hdr, counts) = header(&f, m.size(), sha, &self.build).ok()?;
+        let (hdr, counts) = header(&f, m.size(), sha, &self.build, self.coverage).ok()?;
         let same = w.len() == 4
             && w[0] == m.ino().to_string()
             && w[1] == m.size().to_string()
@@ -656,7 +679,8 @@ impl Planner {
     fn make(&self, base: &Path, elf: &Elf, keep: bool) -> Result<(File, u128), (u64, String)> {
         let t0 = Instant::now();
         let (plan, bytes, bad) =
-            super::plan_verified(elf, &self.build, &self.par).map_err(|e| (NONE_REFUSED, e))?;
+            super::plan_verified_with(elf, &self.build, self.coverage, &self.par)
+                .map_err(|e| (NONE_REFUSED, e))?;
         if plan.sites.is_empty() && plan.entries.is_empty() {
             return Err((NONE_EMPTY, "no site".into()));
         }
@@ -878,7 +902,7 @@ impl Planner {
                     Ok((file, ms)) => {
                         report.ms = ms as u64;
                         let len = file.metadata().map_err(|e| e.to_string())?.len();
-                        let (hdr, counts) = header(&file, len, &sha, &self.build)
+                        let (hdr, counts) = header(&file, len, &sha, &self.build, self.coverage)
                             .map_err(|e| format!("{path}: the plan just made: {e}"))?;
                         (file, hdr, counts)
                     }

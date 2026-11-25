@@ -24,7 +24,10 @@ use super::insn::{self, Flow, Ind, PcRel};
 use crate::rewrite::elf::Elf;
 use crate::rewrite::par::Par;
 use crate::rewrite::plan::{Plan, Site, CELL, PAGE};
-use proto::plan::{A64_COUNT, A64_TRAP, KIND_BEFORE, KIND_COND, KIND_FAR, KIND_JUMP};
+use proto::plan::{
+    A64_COUNT, A64_COUNT_COV, A64_TRAP, COVERAGE_MAP, COVERAGE_SIZE, KIND_BEFORE, KIND_COND,
+    KIND_FAR, KIND_JUMP,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A pair's words, and its store-exclusive with its status register.
@@ -409,6 +412,14 @@ pub fn check(f: &Found, plan: &Plan, par: &Par) -> Vec<String> {
             plan.cell
         ));
     }
+    if plan.coverage {
+        let over_cov = elf.exec
+            && COVERAGE_MAP < span.0.saturating_add(span.1)
+            && span.0 < COVERAGE_MAP + COVERAGE_SIZE;
+        if (elf.exec && in_image(COVERAGE_MAP, COVERAGE_SIZE)) || over_cov {
+            bad.push(format!("coverage bitmap at {COVERAGE_MAP:#x} is not free"));
+        }
+    }
     if !plan.entries.is_empty() {
         bad.push("an arm64 plan with entry rows".into());
     }
@@ -583,32 +594,58 @@ fn check_site(f: &Found, pairs: &BTreeSet<u64>, plan: &Plan, s: &Site) -> Result
     } else {
         0
     };
-    let r = c + A64_COUNT;
+    let r = c + if plan.coverage {
+        A64_COUNT_COV
+    } else {
+        A64_COUNT
+    };
     let rs = r + match s.kind {
         KIND_BEFORE => 8,
         KIND_FAR => 12,
         _ => 4,
     };
-    // The count, as this verifier spells it: save x16 and x17 32 bytes down, x16 = the cell,
-    // x17 = [x16] - 1 stored back, zero to the restore before the trap, restore.
+    // The count, as this verifier spells it: save x16 and x17 32 bytes down, optional 6-word
+    // coverage increment, x16 = the cell, x17 = [x16] - 1 stored back, zero to the restore
+    // before the trap, restore.
+    let cell_off = if plan.coverage {
+        let edge_idx = proto::plan::coverage_index(&plan.sha256, a);
+        let cov_words = [
+            0xa9be_47f0,
+            0xd2a0_0000 | ((COVERAGE_MAP >> 16) as u32) << 5 | 16,
+            0xf280_0000 | ((edge_idx as u32) << 5) | 16,
+            0x3940_0211,
+            0x1100_0631,
+            0x2a51_2231,
+            0x3900_0211,
+        ];
+        if (0..7).any(|k| tw(c + 4 * k) != cov_words[k as usize]) {
+            return Err("the coverage trampoline does not record its edge".into());
+        }
+        c + 28
+    } else {
+        if tw(c) != 0xa9be_47f0 {
+            return Err("the trampoline does not count in the cell".into());
+        }
+        c + 4
+    };
     let words = [
-        0xa9be_47f0,
         0xd2a0_0000 | ((CELL >> 16) as u32) << 5 | 16,
         0xf940_0211,
         0xd100_0631,
         0xf900_0211,
     ];
-    if CELL & !0xffff_0000 != 0 || (0..5).any(|k| tw(c + 4 * k) != words[k as usize]) {
+    if CELL & !0xffff_0000 != 0 || (0..4).any(|k| tw(cell_off + 4 * k) != words[k as usize]) {
         return Err("the trampoline does not count in the cell".into());
     }
-    let cbz = tw(c + 20);
+    let cbz_off = cell_off + 16;
+    let cbz = tw(cbz_off);
     if cbz & 0xff00_001f != 0xb400_0011
-        || insn::flow(t.wrapping_add(c + 20), cbz)
+        || insn::flow(t.wrapping_add(cbz_off), cbz)
             != (Flow::Cond {
                 target: t.wrapping_add(rs),
                 hinted: false,
             })
-        || tw(c + 24) != 0xa8c2_47f0
+        || tw(cbz_off + 4) != 0xa8c2_47f0
     {
         return Err("the count does not branch to the restore before its trap, or restore".into());
     }
