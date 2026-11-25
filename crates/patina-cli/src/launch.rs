@@ -186,7 +186,9 @@ pub struct Layout {
 /// Cached contents of `/etc/ld.so.cache` (once per process).
 fn cached_ld_so_cache() -> Option<Vec<u8>> {
     static CACHE: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| fs::read("/etc/ld.so.cache").ok()).clone()
+    CACHE
+        .get_or_init(|| fs::read("/etc/ld.so.cache").ok())
+        .clone()
 }
 
 /// Cached sorted `(name, target)` entries of `/etc/alternatives`: cached in-process and on disk

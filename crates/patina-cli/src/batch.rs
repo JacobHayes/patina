@@ -18,7 +18,6 @@ use serde_json::json;
 use std::collections::VecDeque;
 use std::fs;
 use std::io::{self, BufRead, BufWriter, Write};
-use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -87,14 +86,15 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     let planner = Arc::new(crate::launcher::boots::warm_planner(&base_opts).map_err(internal)?);
 
     let cpus = crate::launch::allowed_cpus();
-    let default_jobs = cpus.len().min(8).max(1);
+    let default_jobs = cpus.len().clamp(1, 8);
     let jobs = match a.num::<usize>("--jobs").map_err(error)? {
         Some(0) => return Err(error("--jobs must be at least 1".into())),
         Some(j) => j.min(cpus.len().max(1)),
         None => default_jobs,
     };
 
-    let tmp_root = Arc::new(std::env::temp_dir().join(format!("patina-batch-{}", std::process::id())));
+    let tmp_root =
+        Arc::new(std::env::temp_dir().join(format!("patina-batch-{}", std::process::id())));
     fs::create_dir_all(&*tmp_root)
         .map_err(|e| internal(format!("create {}: {e}", tmp_root.display())))?;
 
@@ -203,7 +203,7 @@ fn run_item(
 
     let (run_dir, keep) = match &req.out {
         Some(p) => {
-            let dir = PathBuf::from(crate::config::logical(p));
+            let dir = crate::config::logical(p);
             if let Err(e) = crate::replay::clear_out(&dir) {
                 return json!({
                     "id": id,
@@ -221,7 +221,10 @@ fn run_item(
         if let Err(e) = fs::create_dir_all(&run_dir)
             .map_err(|e| format!("{}: {e}", run_dir.display()))
             .and_then(|_| {
-                crate::result::write_json(&run_dir.join("run.json"), &crate::result::run_json(&opts)?)
+                crate::result::write_json(
+                    &run_dir.join("run.json"),
+                    &crate::result::run_json(&opts)?,
+                )
             })
         {
             return json!({
