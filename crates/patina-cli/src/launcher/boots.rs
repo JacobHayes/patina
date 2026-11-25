@@ -213,10 +213,23 @@ pub fn run_chain_with_planner(
     let mut k = 0;
     let shm = shm_carrier()?;
     let mut plans = [0u64; proto::ctl::PLAN_FIELDS];
+    let t_plan0 = crate::profile::stamp();
     let planner = match shared_planner {
         Some(p) => Some(std::sync::Arc::new(p.session())),
         None => planner(o)?,
     };
+    let t_plan1 = crate::profile::stamp();
+    let planner_span = if crate::profile::enabled() && shared_planner.is_none() {
+        Some(crate::profile::Span::new(
+            "planner_warm",
+            "launcher",
+            t_plan0,
+            t_plan1,
+        ))
+    } else {
+        None
+    };
+    let mut profile_boots: Vec<crate::profile::BootTiming> = Vec::new();
     let mut settle = [0u64; 2];
     let mut ready_ns = [0u64; proto::machine::MAX_MACHINES];
     loop {
@@ -235,6 +248,9 @@ pub fn run_chain_with_planner(
             planner: planner.clone(),
         };
         let mut end = run_boot(o, &bdir, cpu, no_personality, &start)?;
+        if let Some(bt) = end.timing.take() {
+            profile_boots.push(bt);
+        }
         faults.add_boot(&bdir, k, &end);
         if let Some(n) = end.machines.as_mut() {
             let works: Vec<&str> = o.cfg.machines.iter().map(|n| n.disk_path()).collect();
@@ -351,6 +367,8 @@ pub fn run_chain_with_planner(
                     crate::result::ready_json(&names, &ready_ns)
                 }),
                 settle: (settle[0] != 0).then_some(settle),
+                planner_span,
+                profile_boots,
             });
         }
         let (kind, seq, vclock) = crash_detail(&end.verdict.detail)

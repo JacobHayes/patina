@@ -153,10 +153,12 @@ pub fn enter(ts: &mut ThreadState) {
 
 #[inline(never)]
 fn enter_slow(ts: &mut ThreadState) {
+    let t0 = crate::profile::now_ns();
     let p = &mut proc().compute;
     let cell = read_cell();
     let used = p.handed.saturating_sub(cell).clamp(0, p.handed) as u64;
     if used == 0 {
+        crate::profile::record_compute_enter(crate::profile::now_ns().saturating_sub(t0));
         return;
     }
     p.handed -= used as i64;
@@ -167,6 +169,7 @@ fn enter_slow(ts: &mut ThreadState) {
     bump(&c.compute.events, used);
     let t = (c.vclock_ns.load(Relaxed)).saturating_add(used * c.config.compute_charge_ns);
     c.vclock_ns.store(t, Relaxed);
+    crate::profile::record_compute_enter(crate::profile::now_ns().saturating_sub(t0));
 }
 
 /// A return to program code: arm the next segment.
@@ -190,6 +193,7 @@ pub fn exit(ts: &mut ThreadState) {
 /// whose rebuilt code has said hello does not read the view: one gap at a time.
 #[inline(never)]
 fn exit_slow(ts: &mut ThreadState) {
+    let t0 = crate::profile::now_ns();
     ts.compute_segs += 1;
     let c = ctl();
     let cfg = &c.config;
@@ -249,6 +253,7 @@ fn exit_slow(ts: &mut ThreadState) {
     p.stays = ch.stays;
     p.other = runnable >= 2 && ch.reason == REASON_SWITCH;
     write_cell(ch.armed as i64);
+    crate::profile::record_compute_exit(crate::profile::now_ns().saturating_sub(t0));
 }
 
 /// `COMPUTE_HELLO`: map the cell (first hook copy of this image), note the image and its kinds
@@ -430,6 +435,7 @@ fn maps_hit(line: &[u8], pc: u64) -> Option<(u64, u64, &[u8])> {
 /// walks a drawn number of instructions on (`proto::compute::walk`, `spin::walk`) and is taken
 /// there (`switch`).
 pub fn point(ts: &mut ThreadState, frame: &Frame, pc: u64, walk: bool) {
+    let t0 = crate::profile::now_ns();
     let p = &mut proc().compute;
     let reason = match p.mode {
         // The cell ran out by the runtime's own count (a stray store that zeroed it counts the
@@ -437,18 +443,24 @@ pub fn point(ts: &mut ThreadState, frame: &Frame, pc: u64, walk: bool) {
         ON if p.handed == 0 => p.cut,
         // The cell has events left (a call by hand), or no stop is due: nothing happens.
         // `exit` rewrites the cell on the way out.
-        _ => return,
+        _ => {
+            crate::profile::record_compute_point(crate::profile::now_ns().saturating_sub(t0));
+            return;
+        }
     };
     if walk && reason == REASON_SWITCH && ts.vfork == 0 {
         let c = ctl();
         let key = proto::compute::key(c.seq.load(Relaxed), ts.slot, ts.compute_segs);
         let n = proto::compute::walk(c.config.seed, c.config.compute_walk, key);
         if n > 0 {
-            return crate::spin::walk(ts, n, p.seg());
+            crate::spin::walk(ts, n, p.seg());
+            crate::profile::record_compute_point(crate::profile::now_ns().saturating_sub(t0));
+            return;
         }
     }
     let seg = p.seg();
     switch(ts, frame, pc, reason, seg, 0);
+    crate::profile::record_compute_point(crate::profile::now_ns().saturating_sub(t0));
 }
 
 /// Take a compute point's stop at `pc` (as the program sees it): one `Preempt` record (`seg`:

@@ -18,6 +18,7 @@ mod log;
 mod oplog;
 mod path;
 mod plans;
+mod profile;
 mod raw;
 mod resolve;
 mod spin;

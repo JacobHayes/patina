@@ -11,7 +11,7 @@ use crate::sandbox::{self, Op};
 use crate::sys::*;
 use proto::ctl::{
     Config, Ctl, CTL_SIZE, TM_COPIED, TM_EXPORTED, TM_FINISH, TM_FIRST_HELLO, TM_MAIN_EXIT,
-    TM_SUP_START,
+    TM_SANDBOX_PID1, TM_SANDBOX_SETUP, TM_SUP_START,
 };
 use proto::layout::*;
 use std::ffi::CString;
@@ -617,15 +617,53 @@ pub fn run_one(
     cpu: usize,
     no_personality: bool,
 ) -> Res<(RunEnd, serde_json::Value)> {
+    let (end, r, _) = run_one_profiled(o, out, cpu, no_personality, 0, Vec::new())?;
+    Ok((end, r))
+}
+
+/// Like `run_one`, collecting a `RunProfile` when `PATINA_PROFILE` / `PATINA_PROFILE_OUT` is
+/// enabled and attaching `"timing"` to `result.json` (never attached when profiling is off).
+pub fn run_one_profiled(
+    o: &Opts,
+    out: &Path,
+    cpu: usize,
+    no_personality: bool,
+    t_start_ns: u64,
+    mut pre_spans: Vec<crate::profile::Span>,
+) -> Res<(
+    RunEnd,
+    serde_json::Value,
+    Option<crate::profile::RunProfile>,
+)> {
+    let prof = crate::profile::enabled();
+    let t_dir0 = crate::profile::stamp();
     fs::create_dir_all(out).map_err(|e| format!("create {}: {e}", out.display()))?;
     if out.join("result.json").exists() || out.join("boot-1").exists() {
         return Err(format!("{} already holds a run", out.display()));
     }
     crate::result::write_json(&out.join("run.json"), &crate::result::run_json(o)?)?;
+    let t_dir1 = crate::profile::stamp();
+    if prof {
+        pre_spans.push(crate::profile::Span::new(
+            "out_dir_and_run_json",
+            "launcher",
+            t_dir0,
+            t_dir1,
+        ));
+    }
     let mut end = crate::launcher::boots::run_chain(o, out, cpu, no_personality)?;
-    let write = |end: &RunEnd| -> Res<serde_json::Value> {
+    if prof {
+        if let Some(ps) = end.planner_span.take() {
+            pre_spans.push(ps);
+        }
+    }
+    let t_res0 = crate::profile::stamp();
+    let write = |end: &RunEnd, timing: Option<&serde_json::Value>| -> Res<serde_json::Value> {
         let mut r = crate::result::result_json(end, &crate::result::classified(end));
         r["signature"] = crate::signature::of(&r, out);
+        if let Some(t) = timing {
+            r["timing"] = t.clone();
+        }
         crate::result::write_json(&out.join("result.json"), &r)?;
         Ok(r)
     };
@@ -638,17 +676,44 @@ pub fn run_one(
             crate::check::Verdict::not_run()
         });
     }
-    let mut r = write(&end)?;
-    if let (Some(c), true) = (&o.cfg.check, ok) {
-        end.check = Some(crate::check::run(
-            c,
-            out,
-            o.cfg.seed,
-            end.verdict.exit_status,
-        ));
-        r = write(&end)?;
+    let has_check = o.cfg.check.is_some() && ok;
+    if has_check {
+        let _ = write(&end, None)?;
+        if let Some(c) = &o.cfg.check {
+            end.check = Some(crate::check::run(
+                c,
+                out,
+                o.cfg.seed,
+                end.verdict.exit_status,
+            ));
+        }
     }
-    Ok((end, r))
+    if prof {
+        let t_end = crate::profile::stamp();
+        let c = crate::result::classified(&end);
+        let rp = crate::profile::RunProfile {
+            seed: end.seed,
+            outcome: c.outcome.name().to_string(),
+            traps: end.traps,
+            switches: end.switches,
+            t_start_ns: if t_start_ns > 0 { t_start_ns } else { t_dir0 },
+            t_end_ns: t_end,
+            pre_spans,
+            boots: std::mem::take(&mut end.profile_boots),
+            post_spans: vec![crate::profile::Span::new(
+                "result_write_and_check",
+                "launcher",
+                t_res0,
+                t_end,
+            )],
+        };
+        let timing_val = rp.to_timing_json();
+        let r = write(&end, Some(&timing_val))?;
+        Ok((end, r, Some(rp)))
+    } else {
+        let r = write(&end, None)?;
+        Ok((end, r, None))
+    }
 }
 
 /// Where a boot starts: its number, `/in`, the boundary sequence number and
@@ -726,6 +791,8 @@ pub struct BootEnd {
     pub log_bytes: u64,
     /// A run with machines: `result.json`'s `machines` (`result::machines_json`).
     pub machines: Option<serde_json::Value>,
+    /// Coarse phase & optional `patina-rt` profiling for this boot (`PATINA_PROFILE`).
+    pub timing: Option<crate::profile::BootTiming>,
 }
 
 pub use proto::vfs::SANDBOX_ROOTS;
@@ -1246,6 +1313,7 @@ pub fn run_boot(
     cvt_i(unsafe { libc::pipe2(p.as_mut_ptr(), libc::O_CLOEXEC) })
         .map_err(|e| format!("pipe: {e}"))?;
     let (outcome_r, outcome_w) = unsafe { (File::from_raw_fd(p[0]), OwnedFd::from_raw_fd(p[1])) };
+    let t_files_ready = crate::profile::stamp();
 
     // The supervisor runs directly in PID 1 after sandbox setup (no second exec of patina).
     let work = c.disk_path();
@@ -1350,6 +1418,7 @@ pub fn run_boot(
     }
     let personality = !no_personality;
     let perturb = PERTURB.load(Relaxed);
+    let t_spec_ready = crate::profile::stamp();
 
     let mut cmd = sandbox::command(place, move || unsafe {
         if perturb {
@@ -1547,6 +1616,7 @@ pub fn run_boot(
     if c.observe {
         crate::log::take_observations(&bdir)?;
     }
+    let t_stdio_done = crate::profile::stamp();
     let mut refused: Vec<String> = ctl
         .denied_nrs()
         .map(|n| proto::table::name(n).to_string())
@@ -1606,6 +1676,37 @@ pub fn run_boot(
         machines: (!c.machines.is_empty()).then(|| {
             crate::result::machines_json(unsafe { proto::machine::MachineTab::at(ctl_ptr) })
         }),
+        timing: if crate::profile::enabled() {
+            let tm = |i: usize| ctl.timing[i].load(Relaxed);
+            #[cfg(feature = "profile")]
+            let rt = Some(crate::profile::RtProfileSnapshot::read_from_ctl(ctl_ptr));
+            #[cfg(not(feature = "profile"))]
+            let rt = None;
+            Some(crate::profile::BootTiming {
+                boot: start.k + 1,
+                t_boot_start: t_launch,
+                t_files_ready,
+                t_spec_ready,
+                t_spawn,
+                t_sandbox_pid1: tm(TM_SANDBOX_PID1),
+                t_sandbox_setup: tm(TM_SANDBOX_SETUP),
+                t_sup_start: tm(TM_SUP_START),
+                t_copied: tm(TM_COPIED),
+                t_first_hello: tm(TM_FIRST_HELLO),
+                t_main_exit: tm(TM_MAIN_EXIT),
+                t_finish: tm(TM_FINISH),
+                t_exported: tm(TM_EXPORTED),
+                t_verdict,
+                t_waited,
+                t_stdio_done,
+                t_boot_done: mono_ns(),
+                traps: ctl.stats.traps.load(Relaxed),
+                switches: ctl.stats.switches.load(Relaxed),
+                rt,
+            })
+        } else {
+            None
+        },
     };
     if std::env::var_os("PATINA_TEST_TIMING").is_some() {
         // cost measurement start-up breakdown: host CLOCK_MONOTONIC ns, launcher and supervisor marks.

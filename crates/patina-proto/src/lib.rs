@@ -18,6 +18,8 @@ pub mod machine;
 pub mod nr;
 pub mod oplog;
 pub mod plan;
+#[cfg(feature = "profile")]
+pub mod profile;
 pub mod rec;
 pub mod sdk;
 pub mod sigrec;

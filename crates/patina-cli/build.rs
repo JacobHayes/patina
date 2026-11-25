@@ -28,6 +28,8 @@ fn main() {
         Ok("aarch64") => "aarch64-unknown-none-softfloat",
         a => panic!("patina has no runtime for the architecture {a:?}"),
     };
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_PROFILE");
+    let profile = std::env::var_os("CARGO_FEATURE_PROFILE").is_some();
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let mut cmd = Command::new(cargo);
     // The outer build's settings are for the host target; none of them may reach the runtime's.
@@ -41,8 +43,7 @@ fn main() {
             cmd.env_remove(&*k);
         }
     }
-    let status = cmd
-        .current_dir(&rt)
+    cmd.current_dir(&rt)
         .args([
             "build",
             "--release",
@@ -51,9 +52,11 @@ fn main() {
             rt_target,
             "--target-dir",
         ])
-        .arg(&target_dir)
-        .status()
-        .expect("run cargo for patina-rt");
+        .arg(&target_dir);
+    if profile {
+        cmd.args(["--features", "profile"]);
+    }
+    let status = cmd.status().expect("run cargo for patina-rt");
     assert!(status.success(), "building patina-rt failed");
     let bin = target_dir.join(rt_target).join("release/patina-rt");
     println!("cargo:rustc-env=PATINA_RT_EMBED={}", bin.display());

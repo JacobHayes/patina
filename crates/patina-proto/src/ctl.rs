@@ -5,7 +5,10 @@
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 pub const MAGIC: u64 = 0x7461_705f_6c74_6321; // "!ctl_pat"
+#[cfg(not(feature = "profile"))]
 pub const LAYOUT_VERSION: u64 = 32;
+#[cfg(feature = "profile")]
+pub const LAYOUT_VERSION: u64 = 32 | (1 << 32);
 pub const MAX_THREADS: usize = 1024;
 
 /// Seed, rates and limits. Read-only after start.
@@ -398,6 +401,8 @@ pub const TM_FIRST_HELLO: usize = 2;
 pub const TM_MAIN_EXIT: usize = 3;
 pub const TM_FINISH: usize = 4;
 pub const TM_EXPORTED: usize = 5;
+pub const TM_SANDBOX_PID1: usize = 6;
+pub const TM_SANDBOX_SETUP: usize = 7;
 
 /// Site kinds counted in `InsnCtl::patched` (index 0 unused).
 pub const INSN_KINDS: usize = 5;
@@ -486,9 +491,13 @@ const _: () = assert!(core::mem::size_of::<Ctl>() <= 4096);
 pub const CTL_HEADER_SIZE: usize = 4096;
 /// Header, slots, the shared filesystem state (`vfs`), the durability state (`oplog::Dur`),
 /// the network wire's table (`wire::WireTab`), the SDK's site table (`sdk::SdkTab`), the
-/// compute-point image table (`ComputeTab`), the instruction scans (`ScanTab`), then the machine
-/// table (`machine::MachineTab`).
+/// compute-point image table (`ComputeTab`), the instruction scans (`ScanTab`), the machine
+/// table (`machine::MachineTab`), and (when `--features profile`) the inner-loop profile
+/// counters (`profile::ProfileTab`).
+#[cfg(not(feature = "profile"))]
 pub const CTL_SIZE: usize = crate::machine::MACHINE_TAB_OFFSET + crate::machine::MACHINE_TAB_SIZE;
+#[cfg(feature = "profile")]
+pub const CTL_SIZE: usize = crate::profile::PROFILE_TAB_OFFSET + crate::profile::PROFILE_TAB_SIZE;
 
 /// Images listed in `ComputeTab`, and the bytes of each one's path kept (its end).
 pub const IMAGES_MAX: usize = 32;
