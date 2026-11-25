@@ -171,6 +171,12 @@ fn maps_line(w: &mut W, line: &[u8]) -> bool {
     if (RT_BASE..RT_REGION_END).contains(&start) {
         return false; // the runtime's own mappings
     }
+    if config().coverage != 0
+        && (proto::plan::COVERAGE_MAP..proto::plan::COVERAGE_MAP + proto::plan::COVERAGE_SIZE)
+            .contains(&start)
+    {
+        return false;
+    }
     if pathname == b"[stack]"
         || pathname == b"[vdso]"
         || pathname == b"[vvar]"

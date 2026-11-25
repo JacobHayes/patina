@@ -492,6 +492,8 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
         "host-cpu",
         "check",
         "ok-exit",
+        "profile-cpu-interval",
+        "coverage",
     ];
     // A case's checker gets its case, and a checker its timeout, only from run.json.
     let config_only = have
@@ -554,6 +556,12 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
             // Unconditional first (`config::normal`): the list reads back as written.
             let l: Vec<String> = cfg.ok_exit.iter().map(|x| x.to_string()).collect();
             flag("--ok-exit", l.join(","));
+        }
+        if cfg.profile_cpu_interval > 0 {
+            a.push(format!("--profile-cpu={}", cfg.profile_cpu_interval));
+        }
+        if cfg.coverage {
+            a.push("--coverage".into());
         }
     }
     a.push("--".into());

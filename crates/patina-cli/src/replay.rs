@@ -44,7 +44,13 @@ pub fn replay(args: &Args) -> Res<Replayed> {
         return Err("usage: patina replay RUNDIR [--out DIR]".into());
     };
     let rundir = PathBuf::from(rundir);
-    let (cfg, program) = load(&rundir)?;
+    let (mut cfg, program) = load(&rundir)?;
+    if let Some(n) = crate::config::parse_profile_cpu(args)? {
+        cfg.profile_cpu_interval = n;
+    }
+    if args.has("--coverage") {
+        cfg.coverage = true;
+    }
     let recorded = read_json(&rundir.join("result.json"))?;
     let out = match args.last("--out") {
         Some(o) => PathBuf::from(o),

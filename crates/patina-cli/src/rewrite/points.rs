@@ -90,14 +90,21 @@ impl Choice {
 }
 
 /// The site class of an instruction, if it is one.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn classify(i: &Instruction) -> Option<Class> {
-    let back = |t: u64| t <= i.ip();
+    classify_with(i, false)
+}
+
+/// The site class of an instruction; when `coverage` is true, forward direct branches and
+/// calls are also instrumented so straight-line control-flow edges populate the coverage bitmap.
+pub fn classify_with(i: &Instruction, coverage: bool) -> Option<Class> {
+    let want = |t: u64| coverage || t <= i.ip();
     match i.flow_control() {
         FlowControl::ConditionalBranch | FlowControl::UnconditionalBranch => direct_target(i)
-            .filter(|&t| back(t))
+            .filter(|&t| want(t))
             .map(|_| Class::BackBranch),
         FlowControl::Call if i.mnemonic() != Mnemonic::Syscall => direct_target(i)
-            .filter(|&t| back(t))
+            .filter(|&t| want(t))
             .map(|_| Class::BackCall),
         FlowControl::IndirectBranch => Some(Class::IndirectJump),
         FlowControl::Next => {
@@ -422,11 +429,20 @@ impl<'c, 'a> Select<'c, 'a> {
 /// nothing below the end of every patch the parts before it placed, would choose the same and
 /// is taken as it is; any other is chosen again on the whole order's patches (and once one
 /// such places otherwise, the rest of its part too).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn select(code: &Code, par: &Par) -> (Vec<Choice>, BTreeMap<u64, (Form, u8)>) {
+    select_with(code, false, par)
+}
+
+pub fn select_with(
+    code: &Code,
+    coverage: bool,
+    par: &Par,
+) -> (Vec<Choice>, BTreeMap<u64, (Form, u8)>) {
     // Finding the sites is per instruction; choosing where their counts go is in order.
     let sites = code.starts_with(par, |d, a| {
         let i = code.insn_in(d, a)?;
-        classify(&i).map(|class| (i, class))
+        classify_with(&i, coverage).map(|class| (i, class))
     });
     let mut s = Select::new(code);
     let choice = |a: u64, class: Class, outcome: Outcome| Choice {
@@ -534,10 +550,21 @@ impl Space {
 /// One patch's instructions: address, decode, original bytes.
 type Insns<'a> = Vec<(u64, Instruction, &'a [u8])>;
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn emit(
     code: &Code,
     patches: &BTreeMap<u64, (Form, u8)>,
     tramp_vaddr: u64,
+    par: &Par,
+) -> Emitted {
+    emit_with(code, patches, tramp_vaddr, None, par)
+}
+
+pub fn emit_with(
+    code: &Code,
+    patches: &BTreeMap<u64, (Form, u8)>,
+    tramp_vaddr: u64,
+    cov_sha: Option<&[u8; 32]>,
     par: &Par,
 ) -> Emitted {
     let mut e = Emitted {
@@ -592,7 +619,7 @@ pub fn emit(
     let (mut cursor, mut next) = (0, None);
     let mut placed = Vec::with_capacity(work.len());
     for (_, a, form, n, ins, p, mask) in work {
-        let len = tramp_len(form, &ins);
+        let len = tramp_len(form, &ins, cov_sha.is_some());
         let end = a + p as u64 + 5;
         // Constrained trampolines go up from a cursor, in address order: each next one's
         // displacement is smaller, so where one had to skip ahead it goes to the top stripe
@@ -633,7 +660,7 @@ pub fn emit(
             .iter()
             .map(|&(x, a, form, n, ref ins, p)| {
                 let t = tramp_vaddr + x;
-                let (b, mut site) = trampoline(a, ins, form, t)?;
+                let (b, mut site) = trampoline(a, ins, form, t, cov_sha)?;
                 let mut patch = match form {
                     Form::Call => vec![0xe8],
                     Form::Jmp | Form::Before => {
@@ -747,17 +774,23 @@ fn copy_len(i: &Instruction, raw: &[u8]) -> usize {
     }
 }
 
-fn tramp_len(form: Form, ins: &Insns) -> u64 {
+fn tramp_len(form: Form, ins: &Insns, coverage: bool) -> u64 {
     let row = match form {
         Form::Before => ins.iter().map(|(_, i, r)| copy_len(i, r)).sum::<usize>() + 5,
         _ => 5,
     };
-    (10 + row + 4) as u64
+    let cov = if coverage {
+        proto::plan::X86_COV_LEN as usize
+    } else {
+        0
+    };
+    (cov + 10 + row + 4) as u64
 }
 
 /// One trampoline at `t`:
 ///
 /// ```text
+/// [coverage] add byte [COV+idx], 1 ; adc byte [COV+idx], 0   (16 bytes, flags dead here)
 /// T:  dec qword [CELL]     48 FF 0C 25 <abs32>
 ///     jz  S                74 <rel8>
 /// R:  the row: jmp <original target>, or <copies of the instructions>; jmp <next>
@@ -767,8 +800,25 @@ fn tramp_len(form: Form, ins: &Insns) -> u64 {
 ///
 /// A copy is byte for byte but for a RIP-relative displacement (recomputed) and a closing
 /// branch (its rel32 form, to the same target).
-fn trampoline(a: u64, ins: &Insns, form: Form, t: u64) -> Option<(Vec<u8>, Site)> {
-    let mut b = vec![0x48, 0xff, 0x0c, 0x25];
+fn trampoline(
+    a: u64,
+    ins: &Insns,
+    form: Form,
+    t: u64,
+    cov_sha: Option<&[u8; 32]>,
+) -> Option<(Vec<u8>, Site)> {
+    let mut b = Vec::with_capacity(64);
+    if let Some(sha) = cov_sha {
+        let idx = proto::plan::coverage_index(sha, a);
+        let addr = (proto::plan::COVERAGE_MAP + idx as u64) as u32;
+        b.extend_from_slice(&[0x80, 0x04, 0x25]);
+        b.extend_from_slice(&addr.to_le_bytes());
+        b.push(0x01);
+        b.extend_from_slice(&[0x80, 0x14, 0x25]);
+        b.extend_from_slice(&addr.to_le_bytes());
+        b.push(0x00);
+    }
+    b.extend_from_slice(&[0x48, 0xff, 0x0c, 0x25]);
     b.extend_from_slice(&(CELL as u32).to_le_bytes());
     b.extend_from_slice(&[0x74, 0]);
     let r = b.len();

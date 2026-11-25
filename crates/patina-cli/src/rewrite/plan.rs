@@ -91,6 +91,8 @@ pub struct Pages {
 pub struct Plan {
     /// The file's ELF machine (`elf::EM_X86_64`, `elf::EM_AARCH64`).
     pub machine: u16,
+    /// Whether the plan includes `--coverage` edge-bitmap instrumentation.
+    pub coverage: bool,
     pub sha256: [u8; 32],
     pub build: String,
     pub cell: u64,
@@ -129,7 +131,13 @@ impl Plan {
         let mut h = vec![];
         h.extend_from_slice(MAGIC);
         h.extend_from_slice(&VERSION.to_le_bytes());
-        h.extend_from_slice(&(self.machine as u32).to_le_bytes());
+        let machine_flags = (self.machine as u32)
+            | if self.coverage {
+                (proto::plan::PLAN_FLAG_COVERAGE as u32) << 16
+            } else {
+                0
+            };
+        h.extend_from_slice(&machine_flags.to_le_bytes());
         h.extend_from_slice(&self.sha256);
         for v in [self.cell, self.tramp_vaddr, self.tramp.len() as u64] {
             h.extend_from_slice(&v.to_le_bytes());
@@ -196,13 +204,19 @@ impl Plan {
         if r.take(8)? != MAGIC {
             return Err("not a plan file".into());
         }
-        let (version, machine) = (r.u32()?, r.u32()?);
+        let (version, machine_flags) = (r.u32()?, r.u32()?);
+        let machine = machine_flags & 0xffff;
+        let flags = (machine_flags >> 16) as u16;
         let known = [super::elf::EM_X86_64, super::elf::EM_AARCH64].map(u32::from);
-        if version != VERSION || !known.contains(&machine) {
+        if version != VERSION
+            || !known.contains(&machine)
+            || flags & !proto::plan::PLAN_FLAG_COVERAGE != 0
+        {
             return Err(format!(
-                "plan version {version} for machine {machine}: not readable here"
+                "plan version {version} for machine {machine} (flags {flags:#x}): not readable here"
             ));
         }
+        let coverage = flags & proto::plan::PLAN_FLAG_COVERAGE != 0;
         let sha256 = r.take(32)?.try_into().unwrap();
         let (cell, tramp_vaddr, span) = (r.u64()?, r.u64()?, r.u64()? as usize);
         let (np, nt, ns, ne, nc, nb) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?, r.u32()?, r.u32()?);
@@ -287,6 +301,7 @@ impl Plan {
         }
         Ok(Plan {
             machine: machine as u16,
+            coverage,
             sha256,
             build,
             cell,

@@ -57,13 +57,28 @@ pub fn pages(elf: &Elf, patched: &[(u64, Vec<u8>)]) -> Res<Vec<Pages>> {
     Ok(runs)
 }
 
+#[cfg(test)]
 pub fn make_plan(elf: &Elf, build: &str, par: &Par) -> Res<Plan> {
-    plan_placed(elf, build, !elf.exec, par)
+    plan_placed_with(elf, build, !elf.exec, false, par)
+}
+
+pub fn make_plan_with(elf: &Elf, build: &str, coverage: bool, par: &Par) -> Res<Plan> {
+    plan_placed_with(elf, build, !elf.exec, coverage, par)
 }
 
 /// The plan, with trampolines before the image allowed or not (`below`): a standalone copy
 /// cannot place them there.
 pub fn plan_placed(elf: &Elf, build: &str, below: bool, par: &Par) -> Res<Plan> {
+    plan_placed_with(elf, build, below, false, par)
+}
+
+pub fn plan_placed_with(
+    elf: &Elf,
+    build: &str,
+    below: bool,
+    coverage: bool,
+    par: &Par,
+) -> Res<Plan> {
     let text: Vec<(u64, &[u8])> = elf.text.iter().map(|t| (t.addr, elf.bytes(t))).collect();
     if text.iter().any(|(a, _)| a % 4 != 0) {
         return Err("an executable section that is not word-aligned".into());
@@ -81,7 +96,8 @@ pub fn plan_placed(elf: &Elf, build: &str, below: bool, par: &Par) -> Res<Plan> 
             && (!elf.bti || code.word(to).is_some_and(insn::x16_pad))
     };
     let after = tramp_vaddr(elf);
-    let emit = |before| points::emit(&code, Place { after, before }, &far);
+    let cov_sha = coverage.then_some(&elf.sha256);
+    let emit = |before| points::emit_with(&code, Place { after, before }, cov_sha, &far);
     let unreached = |e: &points::Emitted| {
         e.choices
             .iter()
@@ -122,6 +138,14 @@ pub fn plan_placed(elf: &Elf, build: &str, below: bool, par: &Par) -> Res<Plan> 
         return Err(format!(
             "the image or its trampolines overlap the cell at {CELL:#x}"
         ));
+    }
+    if coverage {
+        let (cov, cov_len) = (proto::plan::COVERAGE_MAP, proto::plan::COVERAGE_SIZE);
+        if tramp_vaddr >= elf.image_start() && cov < blob_end && elf.image_start() < cov + cov_len {
+            return Err(format!(
+                "the image or its trampolines overlap the coverage bitmap at {cov:#x}"
+            ));
+        }
     }
     let runs = pages(elf, &em.patched)?;
     let c = code.census();
@@ -176,6 +200,7 @@ pub fn plan_placed(elf: &Elf, build: &str, below: bool, par: &Par) -> Res<Plan> 
     }
     Ok(Plan {
         machine: elf.machine,
+        coverage,
         sha256: elf.sha256,
         build: build.to_string(),
         cell: CELL,

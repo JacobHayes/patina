@@ -132,6 +132,11 @@ impl Frame {
     pub fn set_sp(&mut self, v: u64) {
         self.gregs[RSP] = v;
     }
+    /// The frame pointer register (`rbp`).
+    #[inline(always)]
+    pub fn fp(&self) -> u64 {
+        self.gregs[RBP]
+    }
     /// The system-call number of a SIGSYS frame.
     #[inline(always)]
     pub fn nr(&self) -> u64 {

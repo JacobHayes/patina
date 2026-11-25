@@ -144,8 +144,9 @@ pub unsafe fn reset_signals() {
 pub unsafe fn close_inherited(machines: bool) {
     const _: () = assert!(FD_PLAN == FD_PATINA + 1);
     const _: () = assert!(FD_SHM > FD_PLAN + 1 && FD_MACHINES == FD_SHM + 1);
+    const _: () = assert!(FD_CPU_PROFILE == FD_MACHINES + 1 && FD_COVERAGE == FD_CPU_PROFILE + 1);
     // The shadow stores are made after this, above everything it keeps.
-    const _: () = assert!(FD_SHADOWS > FD_MACHINES);
+    const _: () = assert!(FD_SHADOWS > FD_COVERAGE);
     libc::syscall(libc::SYS_close_range, 3u32, (FD_CTL - 1) as u32, 0u32);
     libc::syscall(
         libc::SYS_close_range,
@@ -159,12 +160,20 @@ pub unsafe fn close_inherited(machines: bool) {
         (FD_SHM - 1) as u32,
         0u32,
     );
-    let from = if machines {
-        FD_MACHINES + 1
-    } else {
-        FD_SHM + 1
-    };
-    libc::syscall(libc::SYS_close_range, from as u32, u32::MAX, 0u32);
+    if !machines {
+        libc::syscall(
+            libc::SYS_close_range,
+            FD_MACHINES as u32,
+            FD_MACHINES as u32,
+            0u32,
+        );
+    }
+    libc::syscall(
+        libc::SYS_close_range,
+        (FD_COVERAGE + 1) as u32,
+        u32::MAX,
+        0u32,
+    );
 }
 
 /// The supervisor's part, at its start: everything its guests inherit from it. `tmpfs_bytes`

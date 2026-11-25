@@ -120,6 +120,7 @@ Keep run output out of your context: read the summary, `report.json`, `result.js
 - `patina guide machines`: several machines in one run, and `patina ctl`
 - `patina guide sweeps`: seeds, test suites, kept runs, known findings
 - `patina guide failures`: reading a failing run: explain, debug, replay, logs
+- `patina guide profiling`: 4-bucket attribution, Perfetto traces, CPU flamegraphs, edge coverage, HTML dashboards
 - `patina guide sdk`: the SDK in Rust, C, Go and Python
 - `patina guide limits`: host setup, containers, CI, and what Patina refuses
 - `patina guide config`: every `patina.toml` key

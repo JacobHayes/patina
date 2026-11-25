@@ -34,11 +34,18 @@ pub const FD_WORKER_CHAN: i32 = 3025;
 /// keeps, so its `close_inherited` closes them).
 pub const FD_MACHINE_STDIO0: i32 = 3030;
 const _: () = {
-    use proto::layout::{FD_MACHINES, FD_PLAN, FD_PROBE_MEM, FD_SHADOWS, FD_STDIN};
+    use proto::layout::{
+        FD_COVERAGE, FD_CPU_PROFILE, FD_MACHINES, FD_PLAN, FD_PROBE_MEM, FD_SHADOWS, FD_STDIN,
+    };
     assert!(FD_PLAN < FD_DATA0);
     assert!(FD_DATA0 + MAX_DATA as i32 <= FD_USERNS);
     assert!(FD_USERNS < FD_SPEC && FD_SPEC < FD_STDIN);
-    assert!(FD_MACHINES < FD_WORKER_CHAN && FD_WORKER_CHAN < FD_MACHINE_STDIO0);
+    assert!(
+        FD_MACHINES < FD_WORKER_CHAN
+            && FD_WORKER_CHAN < FD_CPU_PROFILE
+            && FD_CPU_PROFILE < FD_COVERAGE
+            && FD_COVERAGE < FD_MACHINE_STDIO0
+    );
     // The keeper's descriptors are closed before the supervisor makes the shadow stores.
     assert!(FD_MACHINE_STDIO0 + 3 * (proto::machine::MAX_MACHINES as i32 - 1) < FD_SHADOWS);
     assert!(FD_MACHINE_STDIO0 + 3 * (proto::machine::MAX_MACHINES as i32 - 1) + 2 < FD_PROBE_MEM);
@@ -1795,8 +1802,10 @@ fn machines_keeper(k: &Keeper, chan: RawFd, n: &Machines) {
             Some(ns) => {
                 // The keeper's stderr (`sandbox.log`) until the machine's own replaces it.
                 let mut keep = vec![2, FD_CTL, FD_LOG, FD_OPLOG_META, FD_OPLOG_DATA, FD_RT];
-                if unsafe { libc::fcntl(FD_PLAN, libc::F_GETFD) } >= 0 {
-                    keep.push(FD_PLAN);
+                for fd in [FD_PLAN, FD_CPU_PROFILE, FD_COVERAGE] {
+                    if unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0 {
+                        keep.push(fd);
+                    }
                 }
                 keep.extend(stdio..stdio + 3);
                 if shadows {

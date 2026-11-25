@@ -386,6 +386,71 @@ impl<'a> Elf<'a> {
         (!n.is_empty()).then(|| String::from_utf8_lossy(n).into_owned())
     }
 
+    /// Link virtual address corresponding to executable mapping at page-aligned file offset `off`.
+    pub fn vaddr_at_offset(&self, off: u64) -> Option<u64> {
+        self.loads
+            .iter()
+            .find(|l| {
+                l.flags & PF_X != 0
+                    && (l.off & !(PAGE - 1)) <= off
+                    && off < l.off.saturating_add(l.filesz.max(1))
+            })
+            .map(|l| l.vaddr.wrapping_sub(l.off).wrapping_add(off))
+    }
+
+    /// All defined function symbols `(vaddr, size, name)` from `.symtab` and `.dynsym`, sorted
+    /// by address for fast offline symbolization (`patina profile`).
+    pub fn symbols(&self) -> Vec<(u64, u64, String)> {
+        let d = self.data;
+        let Ok(secs) = self.sections() else {
+            return vec![];
+        };
+        let mut out: Vec<(u64, u64, u8, String)> = vec![];
+        // Priority 0 for .symtab (SHT_SYMTAB = 2), 1 for .dynsym (SHT_DYNSYM = 11).
+        for (prio, typ) in [(0u8, 2u32), (1u8, 11u32)] {
+            for s in secs.iter().filter(|s| s.typ == typ) {
+                let Some(names) = secs.get(s.link as usize).map(|t| t.off) else {
+                    continue;
+                };
+                for k in 0..s.size / 24 {
+                    let o = s.off + k * 24;
+                    let (Ok(shndx), Ok(value), Ok(size), Ok(name_off)) = (
+                        u16_at(d, o + 6),
+                        u64_at(d, o + 8),
+                        u64_at(d, o + 16),
+                        u32_at(d, o),
+                    ) else {
+                        continue;
+                    };
+                    let info = d[o + 4];
+                    if !matches!(info & 0xf, 2 | 10) || shndx == 0 || value == 0 {
+                        continue;
+                    }
+                    let Some(raw) = d.get(names.saturating_add(name_off as usize)..) else {
+                        continue;
+                    };
+                    let Some(end) = raw.iter().position(|&b| b == 0) else {
+                        continue;
+                    };
+                    if end == 0 {
+                        continue;
+                    }
+                    let name = String::from_utf8_lossy(&raw[..end]).into_owned();
+                    out.push((value, size, prio, name));
+                }
+            }
+        }
+        // Sort by address asc, preferring .symtab (prio 0) and larger non-zero size.
+        out.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| a.2.cmp(&b.2))
+                .then_with(|| b.1.cmp(&a.1))
+                .then_with(|| a.3.cmp(&b.3))
+        });
+        out.dedup_by_key(|x| x.0);
+        out.into_iter().map(|(v, sz, _, n)| (v, sz, n)).collect()
+    }
+
     /// The file offset of the loaded byte at `vaddr`, when the file holds it.
     pub fn file_offset(&self, vaddr: u64) -> Option<usize> {
         let l = self

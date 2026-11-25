@@ -100,10 +100,45 @@ pub const KIND_FAR: u8 = 6;
 /// Offset of a `KIND_JUMP` trampoline's `jmp rel32` to the original target: after the count
 /// (`dec qword [abs32]`, 8 bytes) and its `jz` (2 bytes).
 pub const JUMP_ROW: u64 = 10;
+/// Bytes prepended to an x86_64 trampoline in `--coverage` mode:
+/// `add byte [abs32], 1` (8 bytes) + `adc byte [abs32], 0` (8 bytes).
+pub const X86_COV_LEN: u64 = 16;
+/// Offset of a `KIND_JUMP` trampoline's `jmp rel32` when `--coverage` is active.
+pub const JUMP_ROW_COV: u64 = JUMP_ROW + X86_COV_LEN;
 
 /// The count's cell with load-time points: one word below 2 GiB, so a trampoline in any image
 /// reaches it with a 32-bit absolute operand (`dec qword [0x7fff0000]`).
 pub const CELL: u64 = 0x7fff_0000;
+/// Fixed 64 KiB edge-coverage bitmap immediately below `CELL` (`[0x7ffe_0000, 0x7fff_0000)`):
+/// below 2 GiB (32-bit absolute operand on x86_64) and 64 KiB-aligned (`movz` high half on arm64).
+pub const COVERAGE_MAP: u64 = 0x7ffe_0000;
+pub const COVERAGE_SIZE: u64 = 65_536;
+const _: () = assert!(COVERAGE_MAP + COVERAGE_SIZE == CELL && COVERAGE_MAP & 0xffff == 0);
+
+/// Plan header flag bit (packed into the upper 16 bits of the 32-bit machine field) indicating
+/// coverage instrumentation is emitted in the trampolines.
+pub const PLAN_FLAG_COVERAGE: u16 = 1;
+
+/// Deterministic 16-bit bucket index into `COVERAGE_MAP` for a rewritten site `(sha256, addr)`.
+/// Mixing the binary's SHA-256 prefix prevents collisions across distinct executables/libraries.
+#[inline]
+pub fn coverage_index(sha256: &[u8; 32], addr: u64) -> u16 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    let mut i = 0;
+    while i < 8 {
+        h ^= sha256[i] as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        i += 1;
+    }
+    let ab = addr.to_le_bytes();
+    let mut j = 0;
+    while j < 8 {
+        h ^= ab[j] as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        j += 1;
+    }
+    ((h ^ (h >> 16) ^ (h >> 32)) & 0xffff) as u16
+}
 
 /// arm64: a trampoline's trap, `udf #0x7074` (`SIGILL`): a compute point at its site.
 pub const A64_TRAP: u32 = 0x7074;
@@ -113,6 +148,11 @@ pub const A64_TRAP: u32 = 0x7074;
 /// it, the row: `b <target>` (`KIND_JUMP`, `KIND_COND`) or the copied instruction and `b` back
 /// (`KIND_BEFORE`). After the row: `ldp x16, x17, [sp], #32`, the trap, `b` to the row.
 pub const A64_COUNT: u64 = 28;
+/// arm64: additional words inside `count` when `--coverage` is active
+/// (`movz`, `movk`, `ldrb`, `add`, `orr`, `strb`).
+pub const A64_COV_WORDS: u64 = 6;
+/// arm64: bytes of a trampoline's count when `--coverage` is active.
+pub const A64_COUNT_COV: u64 = A64_COUNT + 4 * A64_COV_WORDS;
 
 /// arm64's `shown`: where a stop at `off` bytes into a site's trampoline lands in the program.
 /// `KIND_COND` before its count: at its first word the condition is still to be tested (`addr`),

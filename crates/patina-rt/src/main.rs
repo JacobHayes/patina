@@ -11,6 +11,7 @@ mod exec;
 mod fault;
 mod fdlim;
 mod guest;
+mod guest_profile;
 mod inject;
 mod insn;
 mod loader;

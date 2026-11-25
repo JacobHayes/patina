@@ -343,6 +343,9 @@ fn run_item(
     if let Some(sdk_json) = r.get("sdk") {
         resp["sdk"] = sdk_json.clone();
     }
+    if let Some(cov_json) = r.get("coverage") {
+        resp["coverage"] = cov_json.clone();
+    }
     if keep {
         resp["dir"] = json!(run_dir);
     }

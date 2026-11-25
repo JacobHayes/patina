@@ -64,6 +64,7 @@ fn plan_of(f: &[u8], em: points::Emitted) -> Plan {
         sites: em.sites,
         entries: vec![],
         counts: vec![],
+        coverage: false,
     }
 }
 
@@ -764,4 +765,27 @@ fn no_count_on_a_call_in_a_pair_a_word_whose_address_is_taken_or_beside_data() {
         let got = verify(&f, &one_site(&f, &good, a, w, kind, target));
         assert!(!got.is_empty() && got.iter().all(|g| g.starts_with(&format!("site {a:#x}"))));
     }
+}
+
+#[test]
+fn coverage_plan_emits_verifies_and_round_trips() {
+    let p = program();
+    let f = elf(&p);
+    let e = crate::rewrite::elf::Elf::parse(&f).unwrap();
+    let plain = super::make_plan_with(&e, "test", false, &crate::rewrite::par::Par::one()).unwrap();
+    let cov = super::make_plan_with(&e, "test", true, &crate::rewrite::par::Par::one()).unwrap();
+    assert!(!plain.coverage);
+    assert!(cov.coverage);
+    assert!(!cov.sites.is_empty());
+    assert_eq!(
+        cov.sites[0].tramp_len,
+        plain.sites[0].tramp_len + (proto::plan::A64_COV_WORDS * 4) as u16,
+        "coverage trampolines should include the 6-word coverage prefix"
+    );
+    assert_eq!(verify(&f, &cov), Vec::<String>::new());
+    let raw = cov.to_bytes();
+    let decoded = Plan::from_bytes(&raw).unwrap();
+    assert!(decoded.coverage);
+    assert_eq!(decoded.sites.len(), cov.sites.len());
+    assert_eq!(verify(&f, &decoded), Vec::<String>::new());
 }

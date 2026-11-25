@@ -81,6 +81,12 @@ pub struct Config {
     /// `SIGINT` and `SIGCONT` taken by the runtime, the backstop waiting while the debugger
     /// holds the world) hold only when this is not 0.
     pub debug: u64,
+    /// Deterministic compute-point CPU sampling interval in compute events (`--profile-cpu[=N]`).
+    /// 0: off. Samples go to `FD_CPU_PROFILE` without altering `boundary.log` or scheduling.
+    pub profile_cpu_interval: u64,
+    /// Black-box ELF-rewriter edge-coverage bitmap (`--coverage`). 0: off, 1: active at
+    /// `plan::COVERAGE_MAP` backed by `FD_COVERAGE`.
+    pub coverage: u64,
 }
 
 /// The longest disk path, with its NUL.
@@ -165,6 +171,8 @@ impl Config {
             work: [0; WORK_PATH_MAX],
             machines: 0,
             debug: 0,
+            profile_cpu_interval: 0,
+            coverage: 0,
         }
     }
 }
